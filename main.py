@@ -25,8 +25,12 @@ def init_supabase():
 supabase = init_supabase()
 
 def encode_image(img):
+    """Downscales the image to a max dimension of 1024px and compresses JPEG quality to shrink payload size."""
+    resized_img = img.copy()
+    resized_img.thumbnail((1024, 1024))  # Preserves original aspect ratio
+    
     buffered = io.BytesIO()
-    img.save(buffered, format="JPEG")
+    resized_img.save(buffered, format="JPEG", quality=75, optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def analyze_receipt(model_id, prompt_text, base64_img, api_key):
