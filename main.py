@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 import datetime
+import calendar
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from PIL import Image
@@ -11,6 +12,7 @@ import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder
 from supabase import create_client
 from openai import OpenAI
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
@@ -106,6 +108,8 @@ if "verification_status" not in st.session_state:
     st.session_state.verification_status = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+if "selected_calendar_date" not in st.session_state:
+    st.session_state.selected_calendar_date = None
 
 # --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
@@ -142,6 +146,7 @@ user_options = {
     f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(): u["id"]
     for u in users_data
 }
+user_lookup = {v: k for k, v in user_options.items()}
 
 col_select, col_add = st.columns([2, 1])
 
@@ -173,9 +178,14 @@ if st.session_state.admin:
     st.divider()
     st.subheader("👑 Admin Command Center")
     
-    admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Financial Dashboard", "⚠️ Audit & Discrepancies", "⚙️ Manage Data"])
+    admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs([
+        "📅 Interactive Calendar", 
+        "📊 Financial Dashboard", 
+        "⚠️ Audit & Discrepancies", 
+        "⚙️ Manage Data"
+    ])
 
-    # Query receipts and items independently to guarantee data capture
+    # Fetch data independently to bypass DB foreign key constraints
     try:
         receipts_resp = supabase.table("receipts").select("*").execute()
         receipts_data = receipts_resp.data or []
@@ -224,11 +234,160 @@ if st.session_state.admin:
     else:
         all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
-    # --- TAB 1: FINANCIAL DASHBOARD ---
+    # --- TAB 1: INTERACTIVE CALENDAR ---
     with admin_tab1:
+        st.write("**🗓️ Spending Calendar (Hover for summary, Click a cell to view details)**")
+        if not all_receipts_df.empty:
+            valid_dates = all_receipts_df["date_dt"].dropna()
+            
+            # Select month/year filter
+            if not valid_dates.empty:
+                available_months = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
+                cal_month_str = st.selectbox("Select Month View", options=available_months, index=0)
+                year, month = map(int, cal_month_str.split("-"))
+            else:
+                today = datetime.date.today()
+                year, month = today.year, today.month
+
+            num_days = calendar.monthrange(year, month)[1]
+            month_days = [datetime.date(year, month, day) for day in range(1, num_days + 1)]
+            
+            # Aggregate per date
+            date_stats = {}
+            for d in month_days:
+                d_str = str(d)
+                day_receipts = all_receipts_df[all_receipts_df["date"] == d_str]
+                day_items = all_items_df[all_items_df["date"] == d_str]
+                
+                total_spent = day_receipts["total_amount"].sum() if not day_receipts.empty else 0.0
+                rec_count = len(day_receipts)
+                
+                items_summary = ""
+                if not day_items.empty:
+                    top_items = day_items.head(4)
+                    item_lines = [f"• {r['item_name']}: ${r['price']:.2f}" for _, r in top_items.iterrows()]
+                    items_summary = "<br>".join(item_lines)
+                    if len(day_items) > 4:
+                        items_summary += f"<br>...and {len(day_items) - 4} more"
+                
+                date_stats[d_str] = {
+                    "total_spent": total_spent,
+                    "count": rec_count,
+                    "items_summary": items_summary if items_summary else "No item details"
+                }
+
+            # Build Calendar Grid Data Structure
+            first_day_weekday = calendar.monthrange(year, month)[0] # 0 = Monday
+            
+            grid_x, grid_y, z_vals, text_labels, hover_texts, custom_dates = [], [], [], [], [], []
+            week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            
+            week_idx = 0
+            for day in range(1, num_days + 1):
+                cur_date = datetime.date(year, month, day)
+                d_str = str(cur_date)
+                w_day = cur_date.weekday()
+                
+                if day > 1 and w_day == 0:
+                    week_idx += 1
+
+                stats = date_stats[d_str]
+                spent = stats["total_spent"]
+                count = stats["count"]
+                
+                grid_x.append(week_days[w_day])
+                grid_y.append(f"Week {week_idx + 1}")
+                z_vals.append(spent)
+                text_labels.append(f"<b>{day}</b><br>${spent:.2f}" if spent > 0 else f"{day}")
+                
+                hover_content = f"<b>Date:</b> {d_str}<br><b>Total Spent:</b> ${spent:,.2f}<br><b>Receipts:</b> {count}<br><br><b>Items Preview:</b><br>{stats['items_summary']}"
+                hover_texts.append(hover_content)
+                custom_dates.append(d_str)
+
+            # Create Plotly Heatmap Matrix
+            fig = go.Figure(data=go.Heatmap(
+                x=grid_x,
+                y=grid_y,
+                z=z_vals,
+                text=text_labels,
+                texttemplate="%{text}",
+                hoverinfo="text",
+                hovertext=hover_texts,
+                customdata=custom_dates,
+                colorscale="YlGnBu",
+                showscale=True,
+                colorbar=dict(title="Spent ($)")
+            ))
+
+            fig.update_layout(
+                title=f"Spending Heatmap - {calendar.month_name[month]} {year}",
+                xaxis=dict(title="Day of Week", categoryorder="array", categoryarray=week_days),
+                yaxis=dict(autorange="reversed", title=""),
+                height=420,
+                margin=dict(l=40, r=40, t=50, b=40)
+            )
+
+            # Capture Click Selection Event from Plotly
+            event_data = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
+            
+            selected_date = None
+            if event_data and "selection" in event_data and event_data["selection"].get("points"):
+                point = event_data["selection"]["points"][0]
+                if "customdata" in point:
+                    selected_date = point["customdata"]
+
+            if selected_date:
+                st.session_state.selected_calendar_date = selected_date
+
+            # Render Detailed Breakdown for Selected Date
+            st.divider()
+            active_date = st.session_state.selected_calendar_date
+            if active_date:
+                st.subheader(f"📌 Detailed Breakdown for {active_date}")
+                
+                day_recs = all_receipts_df[all_receipts_df["date"] == active_date]
+                day_its = all_items_df[all_items_df["date"] == active_date]
+
+                if not day_recs.empty:
+                    c1, c2 = st.columns(2)
+                    c1.metric("Day Total Spending", f"${day_recs['total_amount'].sum():,.2f}")
+                    c2.metric("Receipts Logged", len(day_recs))
+
+                    st.write("---")
+                    st.write("**🛒 Items Purchased on this Day:**")
+                    if not day_its.empty:
+                        st.dataframe(
+                            day_its[["item_name", "price", "receipt_id"]],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "item_name": st.column_config.TextColumn("Product / Item"),
+                                "price": st.column_config.NumberColumn("Price ($)", format="$%.2f"),
+                                "receipt_id": st.column_config.TextColumn("Receipt Ref ID")
+                            }
+                        )
+                    else:
+                        st.info("No itemized breakdown saved for this date.")
+
+                    st.write("**🧾 Receipts List:**")
+                    for _, r_row in day_recs.iterrows():
+                        u_name = user_lookup.get(r_row["user_id"], "Unknown User")
+                        with st.expander(f"Receipt ID: {r_row['id']} | User: {u_name} | Total: ${r_row['total_amount']:.2f}"):
+                            st.write(f"Subtotal: ${r_row.get('subtotal', 0.0):.2f}")
+                            if r_row.get("image_url"):
+                                st.markdown(f"[📷 View Original Receipt Image]({r_row['image_url']})")
+                else:
+                    st.info(f"No receipts recorded on {active_date}.")
+            else:
+                st.info("💡 Click on any date box in the calendar chart above to view full itemized receipts.")
+        else:
+            st.info("No receipts recorded yet to generate calendar.")
+
+    # --- TAB 2: FINANCIAL DASHBOARD ---
+    with admin_tab2:
         if not all_receipts_df.empty:
             months_available = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
-            selected_month = st.selectbox("📅 Select Spending Period (Month)", options=["All Time"] + list(months_available))
+            selected_month = st.selectbox("📅 Select Spending Period (Month)", options=["All Time"] + list(months_available), key="fin_dash_month")
 
             filtered_df = all_receipts_df if selected_month == "All Time" else all_receipts_df[all_receipts_df["month_year"] == selected_month]
             filtered_items = all_items_df if selected_month == "All Time" or all_items_df.empty else all_items_df[all_items_df["month_year"] == selected_month]
@@ -263,8 +422,8 @@ if st.session_state.admin:
         else:
             st.info("No receipts recorded yet to build analytics.")
 
-    # --- TAB 2: AUDIT & DISCREPANCIES ---
-    with admin_tab2:
+    # --- TAB 3: AUDIT & DISCREPANCIES ---
+    with admin_tab3:
         st.write("**⚠️ Receipts Flagged for Admin Review**")
         if not all_receipts_df.empty and "is_discrepant" in all_receipts_df:
             flagged = all_receipts_df[all_receipts_df["is_discrepant"] == True]
@@ -286,8 +445,8 @@ if st.session_state.admin:
         else:
             st.info("No records available to audit.")
 
-    # --- TAB 3: MANAGE & DELETE DATA ---
-    with admin_tab3:
+    # --- TAB 4: MANAGE & DELETE DATA ---
+    with admin_tab4:
         col_del_user, col_del_rec = st.columns(2)
 
         with col_del_user:
