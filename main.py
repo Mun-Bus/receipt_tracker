@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 import datetime
-import calendar
+import calendar as py_calendar
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from PIL import Image
@@ -13,6 +13,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 from supabase import create_client
 from openai import OpenAI
 import plotly.graph_objects as go
+from streamlit_calendar import calendar
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
@@ -100,7 +101,7 @@ if "verification_status" not in st.session_state:
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "selected_calendar_date" not in st.session_state:
-    st.session_state.selected_calendar_date = None
+    st.session_state.selected_calendar_date = str(datetime.date.today())
 
 # --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
@@ -228,166 +229,86 @@ if st.session_state.admin:
     else:
         all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
-    # --- TAB 1: INTERACTIVE CALENDAR ---
+    # --- TAB 1: INTERACTIVE FULLCALENDAR ---
     with admin_tab1:
-        st.write("**🗓️ Spending Calendar (Click a cell or select below to view details)**")
+        st.write("**🗓️ Spending Calendar (Click any day or event box to view breakdown)**")
+        
+        calendar_events = []
         if not all_receipts_df.empty:
-            valid_dates = all_receipts_df["date_dt"].dropna()
+            day_totals = all_receipts_df.groupby("date")["total_amount"].sum().reset_index()
+            for _, row in day_totals.iterrows():
+                calendar_events.append({
+                    "title": f"Spent: ${row['total_amount']:.2f}",
+                    "start": str(row["date"]),
+                    "end": str(row["date"]),
+                    "allDay": True,
+                    "backgroundColor": "#2e7bcf",
+                    "borderColor": "#1f5693"
+                })
+
+        calendar_options = {
+            "headerToolbar": {
+                "left": "prev,next today",
+                "center": "title",
+                "right": "dayGridMonth"
+            },
+            "initialView": "dayGridMonth",
+            "selectable": True,
+            "editable": False
+        }
+
+        cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
+
+        if cal_output.get("dateClick"):
+            clicked_date = cal_output["dateClick"]["dateStr"].split("T")[0]
+            if st.session_state.selected_calendar_date != clicked_date:
+                st.session_state.selected_calendar_date = clicked_date
+                st.rerun()
+        elif cal_output.get("eventClick"):
+            event_start = cal_output["eventClick"]["event"]["start"].split("T")[0]
+            if st.session_state.selected_calendar_date != event_start:
+                st.session_state.selected_calendar_date = event_start
+                st.rerun()
+
+        st.divider()
+
+        active_date = st.session_state.selected_calendar_date
+        if active_date:
+            st.subheader(f"📌 Detailed Breakdown for {active_date}")
             
-            if not valid_dates.empty:
-                available_months = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
-                cal_month_str = st.selectbox("Select Month View", options=available_months, index=0)
-                year, month = map(int, cal_month_str.split("-"))
-            else:
-                today = datetime.date.today()
-                year, month = today.year, today.month
+            day_recs = all_receipts_df[all_receipts_df["date"] == active_date] if not all_receipts_df.empty else pd.DataFrame()
+            day_its = all_items_df[all_items_df["date"] == active_date] if not all_items_df.empty else pd.DataFrame()
 
-            num_days = calendar.monthrange(year, month)[1]
-            month_days = [datetime.date(year, month, day) for day in range(1, num_days + 1)]
-            
-            date_stats = {}
-            cell_to_date = {}
-            for d in month_days:
-                d_str = str(d)
-                day_receipts = all_receipts_df[all_receipts_df["date"] == d_str]
-                day_items = all_items_df[all_items_df["date"] == d_str]
-                
-                total_spent = day_receipts["total_amount"].sum() if not day_receipts.empty else 0.0
-                rec_count = len(day_receipts)
-                
-                items_summary = ""
-                if not day_items.empty:
-                    top_items = day_items.head(4)
-                    item_lines = [f"• {r['item_name']}: ${r['price']:.2f}" for _, r in top_items.iterrows()]
-                    items_summary = "<br>".join(item_lines)
-                    if len(day_items) > 4:
-                        items_summary += f"<br>...and {len(day_items) - 4} more"
-                
-                date_stats[d_str] = {
-                    "total_spent": total_spent,
-                    "count": rec_count,
-                    "items_summary": items_summary if items_summary else "No item details"
-                }
+            if not day_recs.empty:
+                c1, c2 = st.columns(2)
+                c1.metric("Day Total Spending", f"${day_recs['total_amount'].sum():,.2f}")
+                c2.metric("Receipts Logged", len(day_recs))
 
-            grid_x, grid_y, z_vals, text_labels, hover_texts, custom_dates = [], [], [], [], [], []
-            week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            
-            week_idx = 0
-            for day in range(1, num_days + 1):
-                cur_date = datetime.date(year, month, day)
-                d_str = str(cur_date)
-                w_day = cur_date.weekday()
-                
-                if day > 1 and w_day == 0:
-                    week_idx += 1
-
-                stats = date_stats[d_str]
-                spent = stats["total_spent"]
-                count = stats["count"]
-                
-                y_label = f"Week {week_idx + 1}"
-                x_label = week_days[w_day]
-                
-                grid_x.append(x_label)
-                grid_y.append(y_label)
-                z_vals.append(spent)
-                text_labels.append(f"<b>{day}</b><br>${spent:.2f}" if spent > 0 else f"{day}")
-                
-                cell_to_date[(y_label, x_label)] = d_str
-                
-                hover_content = f"<b>Date:</b> {d_str}<br><b>Total Spent:</b> ${spent:,.2f}<br><b>Receipts:</b> {count}<br><br><b>Items Preview:</b><br>{stats['items_summary']}"
-                hover_texts.append(hover_content)
-                custom_dates.append(d_str)
-
-            fig = go.Figure(data=go.Heatmap(
-                x=grid_x,
-                y=grid_y,
-                z=z_vals,
-                text=text_labels,
-                texttemplate="%{text}",
-                hoverinfo="text",
-                hovertext=hover_texts,
-                customdata=custom_dates,
-                colorscale="YlGnBu",
-                showscale=True,
-                colorbar=dict(title="Spent ($)")
-            ))
-
-            fig.update_layout(
-                title=f"Spending Heatmap - {calendar.month_name[month]} {year}",
-                xaxis=dict(title="Day of Week", categoryorder="array", categoryarray=week_days),
-                yaxis=dict(autorange="reversed", title=""),
-                clickmode="event+select",
-                height=420,
-                margin=dict(l=40, r=40, t=50, b=40)
-            )
-
-            event_data = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points")
-            
-            if event_data and "selection" in event_data and event_data["selection"].get("points"):
-                pts = event_data["selection"]["points"]
-                if pts:
-                    pt = pts[0]
-                    c_data = pt.get("customdata")
-                    if c_data:
-                        st.session_state.selected_calendar_date = c_data[0] if isinstance(c_data, list) else c_data
-                    else:
-                        x_pt, y_pt = pt.get("x"), pt.get("y")
-                        if (y_pt, x_pt) in cell_to_date:
-                            st.session_state.selected_calendar_date = cell_to_date[(y_pt, x_pt)]
-
-            st.divider()
-            
-            c_select, _ = st.columns([1, 2])
-            with c_select:
-                manual_date = st.selectbox(
-                    "📅 Select Active Date directly:", 
-                    options=sorted(list(date_stats.keys()), reverse=True),
-                    index=0 if st.session_state.selected_calendar_date not in date_stats else sorted(list(date_stats.keys()), reverse=True).index(st.session_state.selected_calendar_date)
-                )
-                st.session_state.selected_calendar_date = manual_date
-
-            active_date = st.session_state.selected_calendar_date
-            if active_date:
-                st.subheader(f"📌 Detailed Breakdown for {active_date}")
-                
-                day_recs = all_receipts_df[all_receipts_df["date"] == active_date]
-                day_its = all_items_df[all_items_df["date"] == active_date]
-
-                if not day_recs.empty:
-                    c1, c2 = st.columns(2)
-                    c1.metric("Day Total Spending", f"${day_recs['total_amount'].sum():,.2f}")
-                    c2.metric("Receipts Logged", len(day_recs))
-
-                    st.write("---")
-                    st.write("**🛒 Items Purchased on this Day:**")
-                    if not day_its.empty:
-                        st.dataframe(
-                            day_its[["item_name", "price", "receipt_id"]],
-                            width="stretch",
-                            hide_index=True,
-                            column_config={
-                                "item_name": st.column_config.TextColumn("Product / Item"),
-                                "price": st.column_config.NumberColumn("Price ($)", format="$%.2f"),
-                                "receipt_id": st.column_config.TextColumn("Receipt Ref ID")
-                            }
-                        )
-                    else:
-                        st.info("No itemized breakdown saved for this date.")
-
-                    st.write("**🧾 Receipts List:**")
-                    for _, r_row in day_recs.iterrows():
-                        u_name = user_lookup.get(r_row["user_id"], "Unknown User")
-                        with st.expander(f"Receipt ID: {r_row['id']} | User: {u_name} | Total: ${r_row['total_amount']:.2f}"):
-                            st.write(f"Subtotal: ${r_row.get('subtotal', 0.0):.2f}")
-                            if r_row.get("image_url"):
-                                st.markdown(f"[📷 View Original Receipt Image]({r_row['image_url']})")
+                st.write("---")
+                st.write("**🛒 Items Purchased on this Day:**")
+                if not day_its.empty:
+                    st.dataframe(
+                        day_its[["item_name", "price", "receipt_id"]],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "item_name": st.column_config.TextColumn("Product / Item"),
+                            "price": st.column_config.NumberColumn("Price ($)", format="$%.2f"),
+                            "receipt_id": st.column_config.TextColumn("Receipt Ref ID")
+                        }
+                    )
                 else:
-                    st.info(f"No receipts recorded on {active_date}.")
+                    st.info("No itemized breakdown saved for this date.")
+
+                st.write("**🧾 Receipts List:**")
+                for _, r_row in day_recs.iterrows():
+                    u_name = user_lookup.get(r_row["user_id"], "Unknown User")
+                    with st.expander(f"Receipt ID: {r_row['id']} | User: {u_name} | Total: ${r_row['total_amount']:.2f}"):
+                        st.write(f"Subtotal: ${r_row.get('subtotal', 0.0):.2f}")
+                        if r_row.get("image_url"):
+                            st.markdown(f"[📷 View Original Receipt Image]({r_row['image_url']})")
             else:
-                st.info("💡 Click on any date box in the calendar chart above to view full itemized receipts.")
-        else:
-            st.info("No receipts recorded yet to generate calendar.")
+                st.info(f"No receipts recorded on {active_date}.")
 
     # --- TAB 2: FINANCIAL DASHBOARD ---
     with admin_tab2:
