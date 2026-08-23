@@ -86,7 +86,7 @@ if "processed_file_id" not in st.session_state:
 if "verification_status" not in st.session_state:
     st.session_state.verification_status = None
 
-# --- SIDEBAR: ADMIN LOGIN & SYSTEM ACTIONS ---
+# --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
 
 if st.session_state.admin:
@@ -154,12 +154,17 @@ if st.session_state.admin:
     
     admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Financial Dashboard", "⚠️ Audit & Discrepancies", "⚙️ Manage Data"])
 
-    # Fetch master records for dashboard
+    # Fetch master records safely with fallback handling
+    master_data = []
     try:
         master_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
         master_data = master_resp.data or []
-    except Exception:
-        master_data = []
+    except Exception as e:
+        try:
+            master_resp = supabase.table("receipts").select("*").execute()
+            master_data = master_resp.data or []
+        except Exception:
+            master_data = []
 
     # Process Master Data
     all_receipts_df = pd.DataFrame(master_data)
@@ -174,7 +179,6 @@ if st.session_state.admin:
             item_sum = sum([float(i.get("price", 0)) for i in items if isinstance(i, dict)])
             total_amt = float(row.get("total_amount", 0))
             
-            # Check discrepancy between calculated items vs receipt total
             discrepancy = round(abs(total_amt - item_sum), 2)
             all_receipts_df.at[idx, "items_sum"] = item_sum
             all_receipts_df.at[idx, "discrepancy"] = discrepancy
