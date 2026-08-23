@@ -229,7 +229,7 @@ if st.session_state.admin:
     else:
         all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
-    # --- TAB 1: INTERACTIVE FULLCALENDAR ---
+    # --- TAB 1: INTERACTIVE FULLCALENDAR (COMPACT VERSION) ---
     with admin_tab1:
         st.write("**🗓️ Spending Calendar (Click any day or event box to view breakdown)**")
         
@@ -254,10 +254,15 @@ if st.session_state.admin:
             },
             "initialView": "dayGridMonth",
             "selectable": True,
-            "editable": False
+            "editable": False,
+            "height": 420,
+            "aspectRatio": 1.8,
         }
 
-        cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
+        cal_col_left, cal_col_center, cal_col_right = st.columns([0.1, 0.8, 0.1])
+
+        with cal_col_center:
+            cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
 
         if cal_output.get("dateClick"):
             clicked_date = cal_output["dateClick"]["dateStr"].split("T")[0]
