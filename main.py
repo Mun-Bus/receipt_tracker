@@ -166,11 +166,12 @@ if st.session_state.admin:
     st.divider()
     st.subheader("👑 Admin Command Center")
     
-    admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs([
+    admin_tab1, admin_tab2, admin_tab3, admin_tab4, admin_tab5 = st.tabs([
         "📅 Calendar", 
         "📊 Dashboard", 
         "⚠️ Audit", 
-        "⚙️ Data"
+        "⚙️ Data",
+        "📤 Bulk Upload"
     ])
 
     try:
@@ -398,6 +399,120 @@ if st.session_state.admin:
                     supabase.table("receipt_items").delete().eq("receipt_id", rec_id).execute()
                     supabase.table("receipts").delete().eq("id", rec_id).execute()
                     st.success("Receipt deleted successfully!")
+                    st.rerun()
+
+    # --- TAB 5: ADMIN BULK UPLOAD ---
+    with admin_tab5:
+        st.write("**📤 Admin Bulk Receipt Processing**")
+        
+        bulk_user_name = st.selectbox(
+            "Assign Uploaded Receipts To:",
+            options=["-- Select Target User --"] + list(user_options.keys()),
+            key="bulk_user_select"
+        )
+        
+        bulk_files = st.file_uploader(
+            "Upload multiple receipt photos",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="admin_bulk_uploader"
+        )
+
+        if bulk_files and st.button("Process & Save All Receipts", type="primary"):
+            if bulk_user_name == "-- Select Target User --":
+                st.warning("Please choose a user to assign these receipts to.")
+            else:
+                target_user_id = user_options[bulk_user_name]
+                key_api = st.secrets.get("OPENROUTER_API_KEY_1", st.secrets.get("OPENROUTER_API_KEY"))
+                
+                if not key_api:
+                    st.error("Missing OpenRouter API Key in Secrets.")
+                else:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    success_count = 0
+                    
+                    for idx, file_item in enumerate(bulk_files):
+                        status_text.text(f"Processing {file_item.name} ({idx+1}/{len(bulk_files)})...")
+                        
+                        try:
+                            image = Image.open(file_item).convert("RGB")
+                            base64_image = encode_image(image)
+                            current_year = datetime.date.today().year
+
+                            prompt = f"""
+                            Analyze this receipt image.
+                            1. Extract transaction date. Format as YYYY-MM-DD. If year is missing, infer using current year ({current_year}).
+                            2. Extract all items/products with names and individual prices.
+                            3. Extract subtotal and final total_amount.
+
+                            Return ONLY valid JSON matching this exact structure:
+                            {{
+                                "date": "YYYY-MM-DD",
+                                "items": [
+                                    {{"item_name": "Item A", "price": 5.00}},
+                                    {{"item_name": "Item B", "price": 2.50}}
+                                ],
+                                "subtotal": 7.50,
+                                "total_amount": 7.50
+                            }}
+                            """
+                            
+                            res, err, used_model = analyze_receipt(prompt, base64_image, key_api)
+                            
+                            if res:
+                                extracted_date_str = res.get("date", "")
+                                try:
+                                    parsed_date = datetime.datetime.strptime(extracted_date_str, "%Y-%m-%d").date()
+                                except ValueError:
+                                    parsed_date = datetime.date.today()
+
+                                subtotal = float(res.get("subtotal", 0.0))
+                                total_amount = float(res.get("total_amount", 0.0))
+                                items = res.get("items", [])
+
+                                # Upload Image to Storage
+                                file_ext = file_item.name.split('.')[-1]
+                                file_path = f"{target_user_id}/{uuid.uuid4()}.{file_ext}"
+                                bytes_data = file_item.getvalue()
+
+                                supabase.storage.from_("receipts-storage").upload(file_path, bytes_data)
+                                public_url = supabase.storage.from_("receipts-storage").get_public_url(file_path)
+
+                                # Save Receipt Payload
+                                receipt_payload = {
+                                    "user_id": target_user_id,
+                                    "date": str(parsed_date),
+                                    "subtotal": subtotal,
+                                    "total_amount": total_amount,
+                                    "image_url": public_url
+                                }
+                                r_res = supabase.table("receipts").insert(receipt_payload).execute()
+
+                                if r_res.data:
+                                    receipt_id = str(r_res.data[0]["id"])
+                                    items_payload = [
+                                        {
+                                            "receipt_id": receipt_id,
+                                            "item_name": str(it.get("item_name", "")),
+                                            "price": float(it.get("price", 0.0))
+                                        }
+                                        for it in items if isinstance(it, dict) and str(it.get("item_name", "")).strip()
+                                    ]
+                                    if items_payload:
+                                        supabase.table("receipt_items").insert(items_payload).execute()
+                                
+                                success_count += 1
+                            else:
+                                st.error(f"Failed to analyze {file_item.name}: {err}")
+                        
+                        except Exception as file_err:
+                            st.error(f"Error processing {file_item.name}: {file_err}")
+                        
+                        progress_bar.progress((idx + 1) / len(bulk_files))
+                    
+                    status_text.empty()
+                    st.success(f"Bulk upload completed! Successfully logged {success_count} of {len(bulk_files)} receipts.")
                     st.rerun()
 
 # --- WORKFLOW SECTION ---
@@ -652,14 +767,12 @@ if active_user_id or st.session_state.admin:
                     key="monthly_summary_dropdown"
                 )
                 
-                # Filter receipts by chosen month
                 month_recs = df_summary[df_summary["month_year"] == selected_sum_month]
                 total_month_cost = month_recs["total_amount"].sum()
                 month_rec_ids = month_recs["id"].astype(str).tolist()
 
                 st.metric(label=f"Total Cost Spent in {selected_sum_month}", value=f"${total_month_cost:,.2f}")
 
-                # Retrieve and list all items bought in that month
                 if all_items_resp and all_items_resp.data:
                     raw_month_items = pd.DataFrame(all_items_resp.data)
                     if not raw_month_items.empty and "receipt_id" in raw_month_items.columns:
@@ -702,3 +815,32 @@ if active_user_id or st.session_state.admin:
         st.info("No receipts recorded yet to build monthly summary.")
 else:
     st.info("Select or add a user profile above, or log in as Admin using the sidebar menu.")
+
+""" Implementing a bulk upload feature for an admin system requires a resilient pipeline that handles file validation, background batch processing, and detailed error feedback.
+
+**1. UI & File Handling (Frontend)**
+* **Template Download:** Provide a button to download a standardized CSV/Excel template with exact header names.
+* **Dropzone Component:** Implement drag-and-drop file input that enforces strict file-type checking (`.csv`, `.xlsx`) and file-size limits (e.g., Max 10MB).
+* **Client-Side Parsing:** Parse the first 5–10 rows immediately (using libraries like `PapaParse` or `SheetJS`) to display an instant preview before triggering the backend upload.
+
+**2. Ingestion & Validation Pipeline (Backend)**
+* **Asynchronous Processing:** Avoid blocking the main HTTP thread for large files. Offload processing to a background job queue (e.g., Redis + BullMQ, Celery, or AWS SQS).
+* **Chunking:** Stream or read the file in chunks (e.g., 500 rows per batch) to prevent memory exhaustion on server nodes.
+* **Data Sanitization:** Run row-by-row schema validation checking for:
+  * Missing required fields.
+  * Duplicate records (against both the file itself and the database).
+  * Formatting errors (invalid email formats, out-of-range numbers).
+
+**3. Database Strategy**
+* **Bulk Upsert:** Use batch insertion or upsert queries (`INSERT INTO ... ON CONFLICT DO UPDATE`) to minimize database roundtrips.
+* **Atomic Transactions:** Wrap each chunk in a database transaction so an unexpected database error rolls back only the failed batch rather than the whole dataset.
+
+**4. Error Reporting & Feedback**
+
+| Component | Function |
+| :--- | :--- |
+| **Status Dashboard** | Live progress bar showing total rows, processed count, and failed count via WebSockets or polling. |
+| **Error Log CSV** | Generates an exported CSV containing only failed rows alongside a newly injected column detailing specific error reasons for quick admin correction. |
+| **Audit Logs** | Tracks who initiated the upload, timestamp, filename, and final row count for administrative compliance. |
+"""
+Assuming you are building this with a standard web stack (e.g., React/Node, Python/Django, or PHP/Laravel), which specific tech stack or framework are you implementing this in?
