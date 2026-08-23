@@ -2,5 +2,5 @@ streamlit
 supabase
 pytesseract
 pandas
-st-aggrid
+streamlit-aggrid
 pillow
