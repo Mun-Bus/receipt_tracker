@@ -57,13 +57,19 @@ def analyze_receipt(model_id, prompt_text, base64_img, api_key):
                 }
             ]
         )
-        ai_text = response.choices[0].message.content
-        json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+        ai_text = response.choices[0].message.content or ""
+        
+        # Clean markdown wrappers if present
+        cleaned = re.sub(r"```json\s*", "", ai_text)
+        cleaned = re.sub(r"```\s*", "", cleaned)
+        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        
         if json_match:
-            return json.loads(json_match.group(0))
+            return json.loads(json_match.group(0)), None
+        else:
+            return None, f"No valid JSON returned ({ai_text[:80]}...)"
     except Exception as e:
-        return {"error": str(e)}
-    return None
+        return None, str(e)
 
 # Initialize session states
 if "admin" not in st.session_state:
@@ -188,32 +194,31 @@ if active_user_id or st.session_state.admin:
                         """
 
                         status.write("⚡ Dispatching Model #1 and Model #2 concurrently...")
-                        
                         api_key = st.secrets["OPENROUTER_API_KEY"]
                         
-                        # Specify two models for parallel execution & comparison
+                        # Use free-tier compatible vision endpoints on OpenRouter
                         model_1 = "openrouter/free"
-                        model_2 = "google/gemini-2.5-flash"
+                        model_2 = "google/gemini-2.0-flash-exp:free"
 
                         with ThreadPoolExecutor(max_workers=2) as executor:
                             future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, api_key)
                             future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, api_key)
 
                             status.write("🔍 Model #1 analyzing items and prices...")
-                            res_1 = future_1.result()
+                            res_1, err_1 = future_1.result()
 
                             status.write("🔍 Model #2 cross-checking values...")
-                            res_2 = future_2.result()
+                            res_2, err_2 = future_2.result()
 
                         status.write("⚖️ Comparing outputs from both models...")
 
-                        # Handle fallback if one model fails
-                        valid_1 = res_1 and "error" not in res_1
-                        valid_2 = res_2 and "error" not in res_2
+                        if err_1:
+                            status.write(f"⚠️ Model #1 log: {err_1}")
+                        if err_2:
+                            status.write(f"⚠️ Model #2 log: {err_2}")
 
                         final_json = None
-                        if valid_1 and valid_2:
-                            # Compare fields
+                        if res_1 and res_2:
                             d1, d2 = res_1.get("date"), res_2.get("date")
                             s1, s2 = float(res_1.get("subtotal", 0)), float(res_2.get("subtotal", 0))
                             t1, t2 = float(res_1.get("total_amount", 0)), float(res_2.get("total_amount", 0))
@@ -224,30 +229,29 @@ if active_user_id or st.session_state.admin:
                                 status.update(label="✅ Dual AI analysis complete — Perfect Match Verified!", state="complete", expanded=False)
                             else:
                                 st.session_state.verification_status = "MISMATCH"
-                                status.update(label="⚠️ Dual AI complete — Minor differences found (using Model #1)", state="complete", expanded=False)
-                            
+                                status.update(label="⚠️ Dual AI complete — Discrepancies detected (using Model #1)", state="complete", expanded=False)
                             final_json = res_1
-                        elif valid_1:
+
+                        elif res_1:
                             final_json = res_1
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label="✅ Analysis complete (Model #1 processed)", state="complete", expanded=False)
-                        elif valid_2:
+                            status.update(label="✅ Analysis complete (Model #1 succeeded)", state="complete", expanded=False)
+
+                        elif res_2:
                             final_json = res_2
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label="✅ Analysis complete (Model #2 processed)", state="complete", expanded=False)
+                            status.update(label="✅ Analysis complete (Model #2 succeeded)", state="complete", expanded=False)
+
                         else:
                             status.update(label="❌ AI extraction failed on both models", state="error")
-                            st.error("Both models failed to parse the receipt.")
 
                         if final_json:
-                            # Parse date safely
                             extracted_date_str = final_json.get("date", "")
                             try:
                                 parsed_date = datetime.datetime.strptime(extracted_date_str, "%Y-%m-%d").date()
                             except ValueError:
                                 parsed_date = datetime.date.today()
 
-                            # Parse items list into DataFrame
                             raw_items = final_json.get("items", [])
                             if isinstance(raw_items, list) and len(raw_items) > 0:
                                 items_df = pd.DataFrame(raw_items)
@@ -263,9 +267,9 @@ if active_user_id or st.session_state.admin:
 
             # Display verification banner
             if st.session_state.verification_status == "MATCH":
-                st.success("✅ **Dual AI Verification Passed:** Both models returned identical date, items, and totals.")
+                st.success("✅ **Dual AI Verification Passed:** Both models returned identical results.")
             elif st.session_state.verification_status == "MISMATCH":
-                st.warning("⚠️ **Dual AI Notice:** Small discrepancies detected between models. Displaying primary model results below.")
+                st.warning("⚠️ **Dual AI Notice:** Minor discrepancies detected between models. Using primary model output.")
 
             st.write("**Verify Data (Read-Only Review):**")
             
