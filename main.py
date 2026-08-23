@@ -23,7 +23,7 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# Initialize OpenRouter Client (OpenAI compatible)
+# Initialize OpenRouter Client
 ai_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=st.secrets["OPENROUTER_API_KEY"]
@@ -35,9 +35,13 @@ def encode_image(img):
     img.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# Initialize session state for Admin Auth
+# Initialize session states
 if "admin" not in st.session_state:
     st.session_state.admin = None
+if "extracted_data" not in st.session_state:
+    st.session_state.extracted_data = {}
+if "processed_file_id" not in st.session_state:
+    st.session_state.processed_file_id = None
 
 # --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
@@ -116,49 +120,78 @@ if active_user_id or st.session_state.admin:
             image = Image.open(uploaded_file).convert("RGB")
             st.image(image, caption="Uploaded Receipt", width=300)
 
-            with st.spinner("Analyzing receipt with Vision AI..."):
-                base64_image = encode_image(image)
-                default_subtotal = 0.0
-                default_total = 0.0
+            # Unique key to avoid re-running AI on unchanged upload
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
-                try:
-                    response = ai_client.chat.completions.create(
-                        model="openrouter/free",
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "Analyze this receipt. Extract subtotal and total_amount. Return ONLY valid JSON format like this: {\"subtotal\": 12.50, \"total_amount\": 15.00}"
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{base64_image}"
+            if st.session_state.processed_file_id != file_id:
+                with st.spinner("Analyzing receipt items & totals with Vision AI..."):
+                    base64_image = encode_image(image)
+                    
+                    prompt = """
+                    Analyze this receipt image in detail. Extract the following:
+                    1. items: List of all products/services bought with their price (e.g. ["Item A - $5.00", "Item B - $2.50"])
+                    2. subtotal: The subtotal amount (numeric)
+                    3. extra_amount: Any tax, tip, or service fee (numeric, 0.0 if none)
+                    4. total_amount: The grand total amount (numeric)
+
+                    Return ONLY a JSON object with this exact structure:
+                    {
+                        "items": ["Product 1 - $10.00", "Product 2 - $5.00"],
+                        "subtotal": 15.00,
+                        "extra_amount": 1.50,
+                        "total_amount": 16.50
+                    }
+                    """
+
+                    try:
+                        response = ai_client.chat.completions.create(
+                            model="google/gemma-3-27b-it:free",
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                            }
                                         }
-                                    }
-                                ]
+                                    ]
+                                }
+                            ]
+                        )
+
+                        ai_text = response.choices[0].message.content
+                        json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                        
+                        if json_match:
+                            extracted = json.loads(json_match.group(0))
+                            items_list = extracted.get("items", [])
+                            items_formatted = "\n".join(items_list) if isinstance(items_list, list) else str(items_list)
+                            
+                            st.session_state.extracted_data = {
+                                "subtotal": float(extracted.get("subtotal", 0.0)),
+                                "extra_amount": float(extracted.get("extra_amount", 0.0)),
+                                "total_amount": float(extracted.get("total_amount", 0.0)),
+                                "items": items_formatted
                             }
-                        ]
-                    )
+                        st.session_state.processed_file_id = file_id
 
-                    ai_text = response.choices[0].message.content
-                    json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
-                    if json_match:
-                        extracted_data = json.loads(json_match.group(0))
-                        default_subtotal = float(extracted_data.get("subtotal", 0.0))
-                        default_total = float(extracted_data.get("total_amount", 0.0))
+                    except Exception as e:
+                        st.error(f"AI extraction error: {e}")
 
-                except Exception as e:
-                    st.error(f"AI extraction error: {e}")
+            # Retrieve processed state
+            ext_data = st.session_state.get("extracted_data", {})
 
             st.write("**Verify Data:**")
             with st.form("receipt_form"):
                 rec_date = st.date_input("Date", value=datetime.date.today())
-                subtotal = st.number_input("Subtotal ($)", value=default_subtotal, step=0.01)
-                total_amount = st.number_input("Total Amount ($)", value=default_total, step=0.01)
-                extra_amount = st.number_input("Extra Amount ($)", value=0.0, step=0.01)
+                subtotal = st.number_input("Subtotal ($)", value=ext_data.get("subtotal", 0.0), step=0.01)
+                extra_amount = st.number_input("Extra Amount / Tax / Tip ($)", value=ext_data.get("extra_amount", 0.0), step=0.01)
+                total_amount = st.number_input("Total Amount ($)", value=ext_data.get("total_amount", 0.0), step=0.01)
+                items_text = st.text_area("Products Bought", value=ext_data.get("items", ""), height=120)
+                
                 submit_btn = st.form_submit_button("Save Receipt")
 
             if submit_btn:
@@ -176,10 +209,15 @@ if active_user_id or st.session_state.admin:
                         "subtotal": subtotal,
                         "total_amount": total_amount,
                         "extra_amount": extra_amount,
+                        "items": items_text,
                         "image_url": public_url
                     }
                     supabase.table("receipts").insert(receipt_payload).execute()
                     st.success("Receipt saved!")
+                    
+                    # Reset state for next upload
+                    st.session_state.processed_file_id = None
+                    st.session_state.extracted_data = {}
                     st.rerun()
                 except Exception as err:
                     st.error(f"Save error: {err}")
@@ -201,7 +239,7 @@ if active_user_id or st.session_state.admin:
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
-        display_cols = ["Rank", "user_id", "date", "subtotal", "extra_amount", "total_amount", "created_at", "image_url"]
+        display_cols = ["Rank", "user_id", "date", "items", "subtotal", "extra_amount", "total_amount", "created_at", "image_url"]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
