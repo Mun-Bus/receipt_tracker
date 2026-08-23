@@ -175,46 +175,54 @@ if st.session_state.admin:
     
     admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Financial Dashboard", "⚠️ Audit & Discrepancies", "⚙️ Manage Data"])
 
-    master_data = []
+    # Query receipts and items independently to guarantee data capture
     try:
-        master_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
-        master_data = master_resp.data or []
+        receipts_resp = supabase.table("receipts").select("*").execute()
+        receipts_data = receipts_resp.data or []
     except Exception:
-        try:
-            master_resp = supabase.table("receipts").select("*").execute()
-            master_data = master_resp.data or []
-        except Exception:
-            master_data = []
+        receipts_data = []
 
-    all_receipts_df = pd.DataFrame(master_data)
-    all_items_list = []
+    try:
+        items_resp = supabase.table("receipt_items").select("*").execute()
+        items_data = items_resp.data or []
+    except Exception:
+        items_data = []
+
+    all_receipts_df = pd.DataFrame(receipts_data)
+    raw_items_df = pd.DataFrame(items_data)
 
     if not all_receipts_df.empty:
         all_receipts_df["date_dt"] = pd.to_datetime(all_receipts_df["date"], errors="coerce")
         all_receipts_df["month_year"] = all_receipts_df["date_dt"].dt.strftime("%Y-%m")
 
+        item_sums = {}
+        if not raw_items_df.empty:
+            raw_items_df["price"] = pd.to_numeric(raw_items_df["price"], errors="coerce").fillna(0.0)
+            item_sums = raw_items_df.groupby("receipt_id")["price"].sum().to_dict()
+
         for idx, row in all_receipts_df.iterrows():
-            items = row.get("receipt_items") or []
-            item_sum = sum([float(i.get("price", 0)) for i in items if isinstance(i, dict)])
-            total_amt = float(row.get("total_amount", 0))
+            r_id = row.get("id")
+            item_sum = float(item_sums.get(r_id, 0.0))
+            total_amt = float(row.get("total_amount", 0.0))
             
             discrepancy = round(abs(total_amt - item_sum), 2)
             all_receipts_df.at[idx, "items_sum"] = item_sum
             all_receipts_df.at[idx, "discrepancy"] = discrepancy
             all_receipts_df.at[idx, "is_discrepant"] = discrepancy > 0.05
 
-            for item in items:
-                if isinstance(item, dict):
-                    all_items_list.append({
-                        "receipt_id": row.get("id"),
-                        "user_id": row.get("user_id"),
-                        "date": row.get("date"),
-                        "month_year": row.get("month_year"),
-                        "item_name": str(item.get("item_name", "")).strip().title(),
-                        "price": float(item.get("price", 0.0))
-                    })
-
-    all_items_df = pd.DataFrame(all_items_list)
+        if not raw_items_df.empty:
+            merged_items = raw_items_df.merge(
+                all_receipts_df[["id", "user_id", "date", "month_year"]],
+                left_on="receipt_id",
+                right_on="id",
+                how="inner"
+            )
+            merged_items["item_name"] = merged_items["item_name"].astype(str).str.strip().str.title()
+            all_items_df = merged_items
+        else:
+            all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
+    else:
+        all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
     # --- TAB 1: FINANCIAL DASHBOARD ---
     with admin_tab1:
@@ -267,6 +275,7 @@ if st.session_state.admin:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
+                        "subtotal": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f"),
                         "total_amount": st.column_config.NumberColumn("Receipt Total ($)", format="$%.2f"),
                         "items_sum": st.column_config.NumberColumn("Item Sum ($)", format="$%.2f"),
                         "discrepancy": st.column_config.NumberColumn("Difference ($)", format="$%.2f")
@@ -294,11 +303,12 @@ if st.session_state.admin:
         with col_del_rec:
             st.write("🗑️ **Delete Specific Receipt**")
             if not all_receipts_df.empty:
-                receipt_list = [f"ID: {r['id']} | Date: {r['date']} | Total: ${r['total_amount']}" for r in master_data]
+                receipt_list = [f"ID: {r['id']} | Date: {r['date']} | Total: ${r['total_amount']}" for r in receipts_data]
                 selected_rec = st.selectbox("Select Receipt to Remove", options=["-- Choose Receipt --"] + receipt_list)
                 if st.button("Delete Selected Receipt", type="primary"):
                     if selected_rec != "-- Choose Receipt --":
                         rec_id = selected_rec.split("ID: ")[1].split(" |")[0]
+                        supabase.table("receipt_items").delete().eq("receipt_id", rec_id).execute()
                         supabase.table("receipts").delete().eq("id", rec_id).execute()
                         st.success("Receipt deleted successfully!")
                         st.rerun()
@@ -311,7 +321,6 @@ if active_user_id or st.session_state.admin:
     if active_user_id:
         st.subheader(f"1. Upload Receipt for {selected_name}")
         
-        # Dynamic key clears the file input automatically after saving
         uploaded_file = st.file_uploader(
             "Upload receipt photo", 
             type=["jpg", "jpeg", "png"], 
@@ -476,7 +485,6 @@ if active_user_id or st.session_state.admin:
 
                     st.success("Receipt and items saved successfully!")
 
-                    # Increment uploader key to clear file input widget and prevent re-running AI
                     st.session_state.uploader_key += 1
                     st.session_state.processed_file_id = None
                     st.session_state.verification_status = None
@@ -496,26 +504,29 @@ if active_user_id or st.session_state.admin:
 
     try:
         if st.session_state.admin and not active_user_id:
-            rec_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
-        elif active_user_id:
-            rec_resp = supabase.table("receipts").select("*, receipt_items(*)").eq("user_id", active_user_id).execute()
-        else:
-            rec_resp = None
-    except Exception:
-        if st.session_state.admin and not active_user_id:
             rec_resp = supabase.table("receipts").select("*").execute()
+            all_items_resp = supabase.table("receipt_items").select("*").execute()
         elif active_user_id:
             rec_resp = supabase.table("receipts").select("*").eq("user_id", active_user_id).execute()
+            all_items_resp = supabase.table("receipt_items").select("*").execute()
         else:
             rec_resp = None
+            all_items_resp = None
+    except Exception:
+        rec_resp = None
+        all_items_resp = None
 
     if rec_resp and rec_resp.data:
         df = pd.DataFrame(rec_resp.data)
         
-        if "receipt_items" in df.columns:
-            df["items"] = df["receipt_items"].apply(
-                lambda items: ", ".join([f"{i.get('item_name')} (${i.get('price')})" for i in items]) if isinstance(items, list) else ""
-            )
+        items_dict = {}
+        if all_items_resp and all_items_resp.data:
+            items_df_tmp = pd.DataFrame(all_items_resp.data)
+            if not items_df_tmp.empty and "receipt_id" in items_df_tmp.columns:
+                for r_id, group in items_df_tmp.groupby("receipt_id"):
+                    items_dict[r_id] = ", ".join([f"{row['item_name']} (${row['price']})" for _, row in group.iterrows()])
+
+        df["items"] = df["id"].apply(lambda r_id: items_dict.get(r_id, ""))
 
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
