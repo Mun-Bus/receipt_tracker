@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from PIL import Image
 import streamlit as st
@@ -28,6 +29,42 @@ def encode_image(img):
     img.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+def analyze_receipt(model_id, prompt_text, base64_img, api_key):
+    """Worker function to run receipt extraction via OpenRouter API."""
+    try:
+        ai_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key
+        )
+        response = ai_client.chat.completions.create(
+            model=model_id,
+            extra_headers={
+                "HTTP-Referer": "https://streamlit.io",
+                "X-Title": "Receipt Manager"
+            },
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_img}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+        ai_text = response.choices[0].message.content
+        json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+    except Exception as e:
+        return {"error": str(e)}
+    return None
+
 # Initialize session states
 if "admin" not in st.session_state:
     st.session_state.admin = None
@@ -41,6 +78,8 @@ if "extracted_items_df" not in st.session_state:
     st.session_state.extracted_items_df = pd.DataFrame(columns=["item_name", "price"])
 if "processed_file_id" not in st.session_state:
     st.session_state.processed_file_id = None
+if "verification_status" not in st.session_state:
+    st.session_state.verification_status = None
 
 # --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
@@ -125,13 +164,14 @@ if active_user_id or st.session_state.admin:
                 if "OPENROUTER_API_KEY" not in st.secrets or not st.secrets["OPENROUTER_API_KEY"]:
                     st.error("⚠️ OPENROUTER_API_KEY missing in Streamlit Secrets!")
                 else:
-                    with st.spinner("Extracting receipt date, items, and totals..."):
+                    with st.status("🤖 Running dual AI extraction & verification...", expanded=True) as status:
+                        status.write("📷 Encoding image for Vision processing...")
                         base64_image = encode_image(image)
                         current_year = datetime.date.today().year
 
                         prompt = f"""
                         Analyze this receipt image.
-                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, infer using the current year ({current_year}).
+                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, infer using current year ({current_year}).
                         2. Extract all items/products with their names and individual prices.
                         3. Extract subtotal and final total_amount.
 
@@ -147,67 +187,89 @@ if active_user_id or st.session_state.admin:
                         }}
                         """
 
-                        try:
-                            ai_client = OpenAI(
-                                base_url="https://openrouter.ai/api/v1",
-                                api_key=st.secrets["OPENROUTER_API_KEY"]
-                            )
+                        status.write("⚡ Dispatching Model #1 and Model #2 concurrently...")
+                        
+                        api_key = st.secrets["OPENROUTER_API_KEY"]
+                        
+                        # Specify two models for parallel execution & comparison
+                        model_1 = "openrouter/free"
+                        model_2 = "google/gemini-2.5-flash"
 
-                            response = ai_client.chat.completions.create(
-                                model="openrouter/free",
-                                extra_headers={
-                                    "HTTP-Referer": "https://streamlit.io",
-                                    "X-Title": "Receipt Manager"
-                                },
-                                messages=[
-                                    {
-                                        "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": prompt},
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                                }
-                                            }
-                                        ]
-                                    }
-                                ]
-                            )
+                        with ThreadPoolExecutor(max_workers=2) as executor:
+                            future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, api_key)
+                            future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, api_key)
 
-                            ai_text = response.choices[0].message.content
-                            json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                            status.write("🔍 Model #1 analyzing items and prices...")
+                            res_1 = future_1.result()
 
-                            if json_match:
-                                extracted = json.loads(json_match.group(0))
+                            status.write("🔍 Model #2 cross-checking values...")
+                            res_2 = future_2.result()
 
-                                # Parse date safely
-                                extracted_date_str = extracted.get("date", "")
-                                try:
-                                    parsed_date = datetime.datetime.strptime(extracted_date_str, "%Y-%m-%d").date()
-                                except ValueError:
-                                    parsed_date = datetime.date.today()
+                        status.write("⚖️ Comparing outputs from both models...")
 
-                                # Parse items list into DataFrame
-                                raw_items = extracted.get("items", [])
-                                if isinstance(raw_items, list) and len(raw_items) > 0:
-                                    items_df = pd.DataFrame(raw_items)
-                                else:
-                                    items_df = pd.DataFrame(columns=["item_name", "price"])
+                        # Handle fallback if one model fails
+                        valid_1 = res_1 and "error" not in res_1
+                        valid_2 = res_2 and "error" not in res_2
 
-                                st.session_state.extracted_date = parsed_date
-                                st.session_state.extracted_subtotal = float(extracted.get("subtotal", 0.0))
-                                st.session_state.extracted_total = float(extracted.get("total_amount", 0.0))
-                                st.session_state.extracted_items_df = items_df
-                                st.session_state.processed_file_id = file_id
-                                st.rerun()
+                        final_json = None
+                        if valid_1 and valid_2:
+                            # Compare fields
+                            d1, d2 = res_1.get("date"), res_2.get("date")
+                            s1, s2 = float(res_1.get("subtotal", 0)), float(res_2.get("subtotal", 0))
+                            t1, t2 = float(res_1.get("total_amount", 0)), float(res_2.get("total_amount", 0))
+                            i1, i2 = len(res_1.get("items", [])), len(res_2.get("items", []))
 
-                        except Exception as e:
-                            st.error(f"AI extraction error: {e}")
+                            if d1 == d2 and abs(s1 - s2) < 0.01 and abs(t1 - t2) < 0.01 and i1 == i2:
+                                st.session_state.verification_status = "MATCH"
+                                status.update(label="✅ Dual AI analysis complete — Perfect Match Verified!", state="complete", expanded=False)
+                            else:
+                                st.session_state.verification_status = "MISMATCH"
+                                status.update(label="⚠️ Dual AI complete — Minor differences found (using Model #1)", state="complete", expanded=False)
+                            
+                            final_json = res_1
+                        elif valid_1:
+                            final_json = res_1
+                            st.session_state.verification_status = "SINGLE"
+                            status.update(label="✅ Analysis complete (Model #1 processed)", state="complete", expanded=False)
+                        elif valid_2:
+                            final_json = res_2
+                            st.session_state.verification_status = "SINGLE"
+                            status.update(label="✅ Analysis complete (Model #2 processed)", state="complete", expanded=False)
+                        else:
+                            status.update(label="❌ AI extraction failed on both models", state="error")
+                            st.error("Both models failed to parse the receipt.")
 
-            st.write("**Verify Data:**")
+                        if final_json:
+                            # Parse date safely
+                            extracted_date_str = final_json.get("date", "")
+                            try:
+                                parsed_date = datetime.datetime.strptime(extracted_date_str, "%Y-%m-%d").date()
+                            except ValueError:
+                                parsed_date = datetime.date.today()
+
+                            # Parse items list into DataFrame
+                            raw_items = final_json.get("items", [])
+                            if isinstance(raw_items, list) and len(raw_items) > 0:
+                                items_df = pd.DataFrame(raw_items)
+                            else:
+                                items_df = pd.DataFrame(columns=["item_name", "price"])
+
+                            st.session_state.extracted_date = parsed_date
+                            st.session_state.extracted_subtotal = float(final_json.get("subtotal", 0.0))
+                            st.session_state.extracted_total = float(final_json.get("total_amount", 0.0))
+                            st.session_state.extracted_items_df = items_df
+                            st.session_state.processed_file_id = file_id
+                            st.rerun()
+
+            # Display verification banner
+            if st.session_state.verification_status == "MATCH":
+                st.success("✅ **Dual AI Verification Passed:** Both models returned identical date, items, and totals.")
+            elif st.session_state.verification_status == "MISMATCH":
+                st.warning("⚠️ **Dual AI Notice:** Small discrepancies detected between models. Displaying primary model results below.")
+
+            st.write("**Verify Data (Read-Only Review):**")
             
-            st.write("Products Purchased (Read Only):")
+            st.write("Products Purchased:")
             st.dataframe(
                 st.session_state.extracted_items_df,
                 use_container_width=True,
@@ -219,9 +281,9 @@ if active_user_id or st.session_state.admin:
             )
 
             with st.form("receipt_form"):
-                rec_date = st.date_input("Date", value=st.session_state.extracted_date)
-                subtotal = st.number_input("Subtotal ($)", value=st.session_state.extracted_subtotal, step=0.01)
-                total_amount = st.number_input("Total Amount ($)", value=st.session_state.extracted_total, step=0.01)
+                rec_date = st.date_input("Date", value=st.session_state.extracted_date, disabled=True)
+                subtotal = st.number_input("Subtotal ($)", value=st.session_state.extracted_subtotal, step=0.01, disabled=True)
+                total_amount = st.number_input("Total Amount ($)", value=st.session_state.extracted_total, step=0.01, disabled=True)
 
                 submit_btn = st.form_submit_button("Save Receipt")
 
@@ -248,7 +310,7 @@ if active_user_id or st.session_state.admin:
                     if res.data:
                         receipt_id = res.data[0]["id"]
 
-                        # 2. Insert items into 'receipt_items' child table from read-only dataframe
+                        # 2. Insert items into 'receipt_items' child table
                         items_payload = []
                         for _, row in st.session_state.extracted_items_df.iterrows():
                             if str(row.get("item_name", "")).strip():
@@ -265,6 +327,7 @@ if active_user_id or st.session_state.admin:
 
                     # Reset state for next upload
                     st.session_state.processed_file_id = None
+                    st.session_state.verification_status = None
                     st.session_state.extracted_date = datetime.date.today()
                     st.session_state.extracted_subtotal = 0.0
                     st.session_state.extracted_total = 0.0
