@@ -79,7 +79,6 @@ def analyze_receipt(prompt_text, base64_img, api_key):
             
             if json_match:
                 data = json.loads(json_match.group(0))
-                # Verify payload contains actual receipt extraction keys
                 if any(k in data for k in ["total_amount", "items", "subtotal", "date"]):
                     return data, None, model_id
             
@@ -105,6 +104,8 @@ if "processed_file_id" not in st.session_state:
     st.session_state.processed_file_id = None
 if "verification_status" not in st.session_state:
     st.session_state.verification_status = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 # --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
@@ -309,7 +310,13 @@ if active_user_id or st.session_state.admin:
     # 1. RECEIPT UPLOAD
     if active_user_id:
         st.subheader(f"1. Upload Receipt for {selected_name}")
-        uploaded_file = st.file_uploader("Upload receipt photo", type=["jpg", "jpeg", "png"])
+        
+        # Dynamic key clears the file input automatically after saving
+        uploaded_file = st.file_uploader(
+            "Upload receipt photo", 
+            type=["jpg", "jpeg", "png"], 
+            key=f"receipt_uploader_{st.session_state.uploader_key}"
+        )
 
         if uploaded_file is not None:
             image = Image.open(uploaded_file).convert("RGB")
@@ -469,6 +476,8 @@ if active_user_id or st.session_state.admin:
 
                     st.success("Receipt and items saved successfully!")
 
+                    # Increment uploader key to clear file input widget and prevent re-running AI
+                    st.session_state.uploader_key += 1
                     st.session_state.processed_file_id = None
                     st.session_state.verification_status = None
                     st.session_state.extracted_date = datetime.date.today()
