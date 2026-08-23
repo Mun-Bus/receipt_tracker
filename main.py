@@ -133,7 +133,7 @@ if active_user_id or st.session_state.admin:
 
                         prompt = f"""
                         Analyze this receipt image.
-                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, assume the current year is {current_year}.
+                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, infer using the current year ({current_year}).
                         2. Extract all items/products with their names and individual prices.
                         3. Extract subtotal, extra_amount (tax/tip/fees), and final total_amount.
 
@@ -211,7 +211,6 @@ if active_user_id or st.session_state.admin:
 
             st.write("**Verify Data:**")
             
-            # Interactive items table editor
             st.write("Products Purchased:")
             edited_items_df = st.data_editor(
                 st.session_state.extracted_items_df,
@@ -287,12 +286,20 @@ if active_user_id or st.session_state.admin:
     # 2. SPREADSHEET VIEWER
     st.subheader("2. Ranked Receipts Spreadsheet")
 
-    if st.session_state.admin and not active_user_id:
-        rec_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
-    elif active_user_id:
-        rec_resp = supabase.table("receipts").select("*, receipt_items(*)").eq("user_id", active_user_id).execute()
-    else:
-        rec_resp = None
+    try:
+        if st.session_state.admin and not active_user_id:
+            rec_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
+        elif active_user_id:
+            rec_resp = supabase.table("receipts").select("*, receipt_items(*)").eq("user_id", active_user_id).execute()
+        else:
+            rec_resp = None
+    except Exception:
+        if st.session_state.admin and not active_user_id:
+            rec_resp = supabase.table("receipts").select("*").execute()
+        elif active_user_id:
+            rec_resp = supabase.table("receipts").select("*").eq("user_id", active_user_id).execute()
+        else:
+            rec_resp = None
 
     if rec_resp and rec_resp.data:
         df = pd.DataFrame(rec_resp.data)
