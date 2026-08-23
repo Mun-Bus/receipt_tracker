@@ -1,7 +1,7 @@
 streamlit
 pandas
 pillow
-st-aggrid
+streamlit-aggrid
 supabase
 openai
 plotly
