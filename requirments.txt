@@ -1,0 +1,6 @@
+streamlit
+supabase
+pytesseract
+pandas
+st-aggrid
+pillow
