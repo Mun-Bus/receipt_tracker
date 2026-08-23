@@ -7,152 +7,169 @@ import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder
 from supabase import create_client
 
-# Page configuration
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
-# Initialize Supabase client using secrets
+# Initialize Supabase client
 @st.cache_resource
 def init_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
 
 supabase = init_supabase()
 
-# Session State Management for User Auth
-if "user" not in st.session_state:
-    st.session_state.user = None
+# Initialize session state for Admin Auth
+if "admin" not in st.session_state:
+    st.session_state.admin = None
 
-# --- AUTHENTICATION SCREEN ---
-if not st.session_state.user:
-    st.title("Receipt Manager - Login")
-    tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
-    
-    with tab1:
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Log In"):
-            try:
-                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                st.session_state.user = res.user
-                st.success("Logged in successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Login failed: {e}")
+# --- SIDEBAR: ADMIN LOGIN (BUILT-IN AUTH) ---
+st.sidebar.title("🔒 System Access")
 
-    with tab2:
-        new_email = st.text_input("Email", key="signup_email")
-        new_password = st.text_input("Password", type="password", key="signup_pass")
-        if st.button("Sign Up"):
-            try:
-                res = supabase.auth.sign_up({"email": new_email, "password": new_password})
-                st.success("Account created! Please log in.")
-            except Exception as e:
-                st.error(f"Sign up failed: {e}")
-
-# --- MAIN APP INTERFACE ---
-else:
-    user_id = st.session_state.user.id
-    
-    # Sidebar Navigation
-    st.sidebar.title("Navigation")
-    st.sidebar.write(f"Logged in as: **{st.session_state.user.email}**")
-    if st.sidebar.button("Logout"):
+if st.session_state.admin:
+    st.sidebar.success(f"Admin Logged In:\n{st.session_state.admin.email}")
+    if st.sidebar.button("Admin Log Out"):
         supabase.auth.sign_out()
-        st.session_state.user = None
+        st.session_state.admin = None
         st.rerun()
-
-    st.title("Receipt Manager & Ranking Dashboard")
-
-    # Section 1: Receipt Upload & Processing
-    st.subheader("1. Upload & Scan Receipt")
-    uploaded_file = st.file_uploader("Choose a receipt photo", type=["jpg", "jpeg", "png"])
-
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Receipt", width=300)
-
-        # Run OCR
-        with st.spinner("Extracting text from image..."):
-            raw_text = pytesseract.image_to_string(image)
-            
-            # Simple Regex helpers to detect total dollar amounts
-            numbers_with_currency = re.findall(r'(\d+[\.,]?\d*)\s*[\$]?', raw_text)
-            extracted_amounts = [float(num.replace(',', '.')) for num in numbers_with_currency if num.replace('.', '').isdigit()]
-            
-            default_total = max(extracted_amounts) if extracted_amounts else 0.0
-            default_subtotal = extracted_amounts[0] if len(extracted_amounts) > 1 else default_total
-
-        # Editable form so user can review/verify handwritten OCR errors
-        st.write("**Verify Extracted Data:**")
-        with st.form("receipt_form"):
-            rec_date = st.text_input("Transaction Date", value="August 8")
-            subtotal = st.number_input("Subtotal ($)", value=float(default_subtotal), step=1.0)
-            total_amount = st.number_input("Total Amount ($)", value=float(default_total), step=1.0)
-            extra_amount = st.number_input("Extra Amount / Fee ($)", value=0.0, step=1.0)
-            
-            submit_button = st.form_submit_button("Save to Database")
-
-        if submit_button:
+else:
+    with st.sidebar.expander("🔑 Admin Login", expanded=False):
+        admin_email = st.text_input("Admin Email")
+        admin_password = st.text_input("Password", type="password")
+        if st.button("Authenticate Admin"):
             try:
-                # 1. Save Image to Supabase Storage Bucket
-                file_ext = uploaded_file.name.split('.')[-1]
-                file_path = f"{user_id}/{uuid.uuid4()}.{file_ext}"
-                bytes_data = uploaded_file.getvalue()
-                
-                supabase.storage.from_("receipts-storage").upload(file_path, bytes_data)
-                public_image_url = supabase.storage.from_("receipts-storage").get_public_url(file_path)
-
-                # 2. Insert into `receipts` table
-                receipt_payload = {
-                    "user_id": user_id,
-                    "date": rec_date,
-                    "subtotal": subtotal,
-                    "total_amount": total_amount,
-                    "extra_amount": extra_amount,
-                    "image_url": public_image_url
-                }
-                res = supabase.table("receipts").insert(receipt_payload).execute()
-                
-                st.success("Receipt saved successfully!")
+                res = supabase.auth.sign_in_with_password({
+                    "email": admin_email,
+                    "password": admin_password
+                })
+                st.session_state.admin = res.user
+                st.success("Admin authenticated!")
                 st.rerun()
-            except Exception as err:
-                st.error(f"Error saving receipt: {err}")
+            except Exception as e:
+                st.error("Invalid admin credentials.")
 
+# --- MAIN SCREEN: STANDARD USER MANAGEMENT ---
+st.title("Receipt Manager")
+
+# Fetch regular profiles from custom 'users' table
+users_resp = supabase.table("users").select("*").execute()
+users_data = users_resp.data or []
+
+user_options = {
+    f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(): u["id"]
+    for u in users_data
+}
+
+col_select, col_add = st.columns([2, 1])
+
+with col_select:
+    selected_name = st.selectbox(
+        "Select User Profile",
+        options=["-- Select Your Name --"] + list(user_options.keys())
+    )
+
+with col_add:
+    with st.expander("➕ Add New User"):
+        new_first = st.text_input("First Name")
+        new_last = st.text_input("Last Name")
+        if st.button("Create Profile"):
+            if new_first:
+                supabase.table("users").insert({
+                    "first_name": new_first,
+                    "last_name": new_last
+                }).execute()
+                st.success(f"Added {new_first}!")
+                st.rerun()
+            else:
+                st.warning("First name required.")
+
+# Admin Banner
+if st.session_state.admin:
+    st.info("⚡ **Admin Mode Active:** You can view master logs for all users.")
+
+active_user_id = user_options.get(selected_name) if selected_name != "-- Select Your Name --" else None
+
+# --- WORKFLOW SECTION ---
+if active_user_id or st.session_state.admin:
     st.divider()
 
-    # Section 2: Interactive Ranked Spreadsheet Viewer
+    # 1. RECEIPT UPLOAD (Requires a selected profile)
+    if active_user_id:
+        st.subheader(f"1. Upload Receipt for {selected_name}")
+        uploaded_file = st.file_uploader("Upload receipt photo", type=["jpg", "jpeg", "png"])
+
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded Receipt", width=300)
+
+            with st.spinner("Processing image..."):
+                raw_text = pytesseract.image_to_string(image)
+                numbers = re.findall(r'(\d+[\.,]?\d*)', raw_text)
+                extracted_amounts = [float(n.replace(',', '.')) for n in numbers if n.replace('.', '').isdigit()]
+                
+                default_total = max(extracted_amounts) if extracted_amounts else 0.0
+                default_subtotal = extracted_amounts[0] if len(extracted_amounts) > 1 else default_total
+
+            st.write("**Verify Data:**")
+            with st.form("receipt_form"):
+                rec_date = st.text_input("Date", value="August 8")
+                subtotal = st.number_input("Subtotal ($)", value=float(default_subtotal), step=1.0)
+                total_amount = st.number_input("Total Amount ($)", value=float(default_total), step=1.0)
+                extra_amount = st.number_input("Extra Amount ($)", value=0.0, step=1.0)
+                submit_btn = st.form_submit_button("Save Receipt")
+
+            if submit_btn:
+                try:
+                    file_ext = uploaded_file.name.split('.')[-1]
+                    file_path = f"{active_user_id}/{uuid.uuid4()}.{file_ext}"
+                    bytes_data = uploaded_file.getvalue()
+
+                    supabase.storage.from_("receipts-storage").upload(file_path, bytes_data)
+                    public_url = supabase.storage.from_("receipts-storage").get_public_url(file_path)
+
+                    receipt_payload = {
+                        "user_id": active_user_id,
+                        "date": rec_date,
+                        "subtotal": subtotal,
+                        "total_amount": total_amount,
+                        "extra_amount": extra_amount,
+                        "image_url": public_url
+                    }
+                    supabase.table("receipts").insert(receipt_payload).execute()
+                    st.success("Receipt saved!")
+                    st.rerun()
+                except Exception as err:
+                    st.error(f"Save error: {err}")
+
+        st.divider()
+
+    # 2. SPREADSHEET VIEWER
     st.subheader("2. Ranked Receipts Spreadsheet")
 
-    # Fetch user data from database
-    response = supabase.table("receipts").select("*").eq("user_id", user_id).execute()
-    records = response.data
+    if st.session_state.admin and not active_user_id:
+        # Admin views ALL database entries
+        rec_resp = supabase.table("receipts").select("*").execute()
+    elif active_user_id:
+        # Filtered to selected user profile
+        rec_resp = supabase.table("receipts").select("*").eq("user_id", active_user_id).execute()
+    else:
+        rec_resp = None
 
-    if records:
-        df = pd.DataFrame(records)
-
-        # Rank receipts automatically by Total Amount (Highest first)
+    if rec_resp and rec_resp.data:
+        df = pd.DataFrame(rec_resp.data)
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
-        # Organize column display order
-        display_cols = ["Rank", "date", "subtotal", "extra_amount", "total_amount", "created_at", "image_url"]
+        display_cols = ["Rank", "user_id", "date", "subtotal", "extra_amount", "total_amount", "created_at", "image_url"]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
-        # Interactive AgGrid configuration
         gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationAutoPageSize=True)
-        gb.configure_side_bar()
         gb.configure_default_column(editable=True, groupable=True)
-        
         gridOptions = gb.build()
 
-        AgGrid(
-            df_display,
-            gridOptions=gridOptions,
-            enable_enterprise_modules=False,
-            height=350,
-            theme="alpine"
-        )
+        AgGrid(df_display, gridOptions=gridOptions, height=350, theme="alpine")
     else:
-        st.info("No receipts found. Upload your first receipt above to populate the spreadsheet!")
+        st.info("No receipts found for this view.")
+else:
+    st.info("Select or add a user profile above, or log in as Admin using the sidebar menu.")
