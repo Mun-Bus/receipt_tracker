@@ -59,7 +59,6 @@ def analyze_receipt(model_id, prompt_text, base64_img, api_key):
         )
         ai_text = response.choices[0].message.content or ""
         
-        # Clean markdown wrappers if present
         cleaned = re.sub(r"```json\s*", "", ai_text)
         cleaned = re.sub(r"```\s*", "", cleaned)
         json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
@@ -87,7 +86,7 @@ if "processed_file_id" not in st.session_state:
 if "verification_status" not in st.session_state:
     st.session_state.verification_status = None
 
-# --- SIDEBAR: ADMIN LOGIN ---
+# --- SIDEBAR: ADMIN LOGIN & SYSTEM ACTIONS ---
 st.sidebar.title("🔒 System Access")
 
 if st.session_state.admin:
@@ -146,10 +145,140 @@ with col_add:
             else:
                 st.warning("First name required.")
 
-if st.session_state.admin:
-    st.info("⚡ **Admin Mode Active:** You can view master logs for all users.")
-
 active_user_id = user_options.get(selected_name) if selected_name != "-- Select Your Name --" else None
+
+# --- ADMIN CONTROL & ANALYTICS DASHBOARD ---
+if st.session_state.admin:
+    st.divider()
+    st.subheader("👑 Admin Command Center")
+    
+    admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Financial Dashboard", "⚠️ Audit & Discrepancies", "⚙️ Manage Data"])
+
+    # Fetch master records for dashboard
+    try:
+        master_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
+        master_data = master_resp.data or []
+    except Exception:
+        master_data = []
+
+    # Process Master Data
+    all_receipts_df = pd.DataFrame(master_data)
+    all_items_list = []
+
+    if not all_receipts_df.empty:
+        all_receipts_df["date_dt"] = pd.to_datetime(all_receipts_df["date"], errors="coerce")
+        all_receipts_df["month_year"] = all_receipts_df["date_dt"].dt.strftime("%Y-%m")
+
+        for idx, row in all_receipts_df.iterrows():
+            items = row.get("receipt_items") or []
+            item_sum = sum([float(i.get("price", 0)) for i in items if isinstance(i, dict)])
+            total_amt = float(row.get("total_amount", 0))
+            
+            # Check discrepancy between calculated items vs receipt total
+            discrepancy = round(abs(total_amt - item_sum), 2)
+            all_receipts_df.at[idx, "items_sum"] = item_sum
+            all_receipts_df.at[idx, "discrepancy"] = discrepancy
+            all_receipts_df.at[idx, "is_discrepant"] = discrepancy > 0.05
+
+            for item in items:
+                if isinstance(item, dict):
+                    all_items_list.append({
+                        "receipt_id": row.get("id"),
+                        "user_id": row.get("user_id"),
+                        "date": row.get("date"),
+                        "month_year": row.get("month_year"),
+                        "item_name": str(item.get("item_name", "")).strip().title(),
+                        "price": float(item.get("price", 0.0))
+                    })
+
+    all_items_df = pd.DataFrame(all_items_list)
+
+    # --- TAB 1: FINANCIAL DASHBOARD ---
+    with admin_tab1:
+        if not all_receipts_df.empty:
+            months_available = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
+            selected_month = st.selectbox("📅 Select Spending Period (Month)", options=["All Time"] + list(months_available))
+
+            filtered_df = all_receipts_df if selected_month == "All Time" else all_receipts_df[all_receipts_df["month_year"] == selected_month]
+            filtered_items = all_items_df if selected_month == "All Time" or all_items_df.empty else all_items_df[all_items_df["month_year"] == selected_month]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Spending", f"${filtered_df['total_amount'].sum():,.2f}")
+            m2.metric("Receipt Count", len(filtered_df))
+            m3.metric("Flagged Discrepancies", int(filtered_df['is_discrepant'].sum()) if 'is_discrepant' in filtered_df else 0)
+
+            st.write("---")
+            st.write("**🛒 Itemized Breakdown (e.g., Apple, Bread Spending)**")
+            if not filtered_items.empty:
+                item_group = filtered_items.groupby("item_name").agg(
+                    Total_Spent=("price", "sum"),
+                    Times_Purchased=("price", "count"),
+                    Avg_Price=("price", "mean")
+                ).reset_index().sort_values(by="Total_Spent", ascending=False)
+
+                st.dataframe(
+                    item_group,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "item_name": st.column_config.TextColumn("Product / Item"),
+                        "Total_Spent": st.column_config.NumberColumn("Total Spent ($)", format="$%.2f"),
+                        "Times_Purchased": st.column_config.NumberColumn("Quantity Count"),
+                        "Avg_Price": st.column_config.NumberColumn("Average Price ($)", format="$%.2f")
+                    }
+                )
+            else:
+                st.info("No item details found for this period.")
+        else:
+            st.info("No receipts recorded yet to build analytics.")
+
+    # --- TAB 2: AUDIT & DISCREPANCIES ---
+    with admin_tab2:
+        st.write("**⚠️ Receipts Flagged for Admin Review**")
+        if not all_receipts_df.empty and "is_discrepant" in all_receipts_df:
+            flagged = all_receipts_df[all_receipts_df["is_discrepant"] == True]
+            if not flagged.empty:
+                st.warning(f"Found {len(flagged)} receipt(s) where the total amount does not match the sum of individual line items.")
+                st.dataframe(
+                    flagged[["id", "user_id", "date", "subtotal", "total_amount", "items_sum", "discrepancy"]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "total_amount": st.column_config.NumberColumn("Receipt Total ($)", format="$%.2f"),
+                        "items_sum": st.column_config.NumberColumn("Item Sum ($)", format="$%.2f"),
+                        "discrepancy": st.column_config.NumberColumn("Difference ($)", format="$%.2f")
+                    }
+                )
+            else:
+                st.success("✅ All receipts pass sum audit! Item totals match final totals.")
+        else:
+            st.info("No records available to audit.")
+
+    # --- TAB 3: MANAGE & DELETE DATA ---
+    with admin_tab3:
+        col_del_user, col_del_rec = st.columns(2)
+
+        with col_del_user:
+            st.write("🗑️ **Delete User Profile**")
+            user_to_delete = st.selectbox("Select User to Remove", options=["-- Choose User --"] + list(user_options.keys()))
+            if st.button("Delete User Profile", type="primary"):
+                if user_to_delete != "-- Choose User --":
+                    u_id = user_options[user_to_delete]
+                    supabase.table("users").delete().eq("id", u_id).execute()
+                    st.success(f"User '{user_to_delete}' removed successfully!")
+                    st.rerun()
+
+        with col_del_rec:
+            st.write("🗑️ **Delete Specific Receipt**")
+            if not all_receipts_df.empty:
+                receipt_list = [f"ID: {r['id']} | Date: {r['date']} | Total: ${r['total_amount']}" for r in master_data]
+                selected_rec = st.selectbox("Select Receipt to Remove", options=["-- Choose Receipt --"] + receipt_list)
+                if st.button("Delete Selected Receipt", type="primary"):
+                    if selected_rec != "-- Choose Receipt --":
+                        rec_id = selected_rec.split("ID: ")[1].split(" |")[0]
+                        supabase.table("receipts").delete().eq("id", rec_id).execute()
+                        st.success("Receipt deleted successfully!")
+                        st.rerun()
 
 # --- WORKFLOW SECTION ---
 if active_user_id or st.session_state.admin:
@@ -167,7 +296,6 @@ if active_user_id or st.session_state.admin:
             file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
             if st.session_state.processed_file_id != file_id:
-                # Retrieve both API keys from Streamlit secrets (or fallback to single key)
                 key_1 = st.secrets.get("OPENROUTER_API_KEY_1", st.secrets.get("OPENROUTER_API_KEY"))
                 key_2 = st.secrets.get("OPENROUTER_API_KEY_2", st.secrets.get("OPENROUTER_API_KEY"))
 
@@ -181,8 +309,8 @@ if active_user_id or st.session_state.admin:
 
                         prompt = f"""
                         Analyze this receipt image.
-                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, infer using current year ({current_year}).
-                        2. Extract all items/products with their names and individual prices.
+                        1. Extract transaction date. Format as YYYY-MM-DD. If year is missing, infer using current year ({current_year}).
+                        2. Extract all items/products with names and individual prices.
                         3. Extract subtotal and final total_amount.
 
                         Return ONLY valid JSON matching this exact structure:
@@ -202,7 +330,6 @@ if active_user_id or st.session_state.admin:
                         model_1 = "openrouter/free"
                         model_2 = "google/gemini-2.0-flash-exp:free"
 
-                        # Executing simultaneously across threads with separate API keys
                         with ThreadPoolExecutor(max_workers=2) as executor:
                             future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, key_1)
                             future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, key_2)
@@ -303,7 +430,6 @@ if active_user_id or st.session_state.admin:
                     supabase.storage.from_("receipts-storage").upload(file_path, bytes_data)
                     public_url = supabase.storage.from_("receipts-storage").get_public_url(file_path)
 
-                    # 1. Insert into 'receipts' table
                     receipt_payload = {
                         "user_id": active_user_id,
                         "date": str(rec_date),
@@ -313,11 +439,9 @@ if active_user_id or st.session_state.admin:
                     }
                     res = supabase.table("receipts").insert(receipt_payload).execute()
                     
-                    # Get newly created receipt ID
                     if res.data:
                         receipt_id = res.data[0]["id"]
 
-                        # 2. Insert items into 'receipt_items' child table
                         items_payload = []
                         for _, row in st.session_state.extracted_items_df.iterrows():
                             if str(row.get("item_name", "")).strip():
@@ -332,7 +456,6 @@ if active_user_id or st.session_state.admin:
 
                     st.success("Receipt and items saved successfully!")
 
-                    # Reset state for next upload
                     st.session_state.processed_file_id = None
                     st.session_state.verification_status = None
                     st.session_state.extracted_date = datetime.date.today()
@@ -367,7 +490,6 @@ if active_user_id or st.session_state.admin:
     if rec_resp and rec_resp.data:
         df = pd.DataFrame(rec_resp.data)
         
-        # Format item list from child table for easy viewing
         if "receipt_items" in df.columns:
             df["items"] = df["receipt_items"].apply(
                 lambda items: ", ".join([f"{i.get('item_name')} (${i.get('price')})" for i in items]) if isinstance(items, list) else ""
