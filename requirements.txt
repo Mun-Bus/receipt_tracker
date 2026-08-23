@@ -1,7 +1,7 @@
 streamlit
-supabase
 pandas
-streamlit-aggrid
 pillow
+st-aggrid
+supabase
 openai
-plotly.graph_objects
+plotly
