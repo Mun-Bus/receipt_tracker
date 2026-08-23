@@ -27,7 +27,7 @@ supabase = init_supabase()
 def encode_image(img):
     """Downscales the image to a max dimension of 1024px and compresses JPEG quality to shrink payload size."""
     resized_img = img.copy()
-    resized_img.thumbnail((1024, 1024))  # Preserves original aspect ratio
+    resized_img.thumbnail((1024, 1024))
     
     buffered = io.BytesIO()
     resized_img.save(buffered, format="JPEG", quality=75, optimize=True)
@@ -101,7 +101,7 @@ if st.session_state.admin:
         st.rerun()
 else:
     with st.sidebar.expander("🔑 Admin Login", expanded=False):
-        admin_email = st.text_input("Admin Email", type="email")
+        admin_email = st.text_input("Admin Email")
         admin_password = st.text_input("Password", type="password")
         if st.button("Authenticate Admin"):
             try:
@@ -311,7 +311,7 @@ if active_user_id or st.session_state.admin:
                     st.error("⚠️ Missing API keys! Please define OPENROUTER_API_KEY_1 and OPENROUTER_API_KEY_2 in Streamlit Secrets.")
                 else:
                     with st.status("🤖 Running dual AI extraction & verification...", expanded=True) as status:
-                        status.write("📷 Encoding image for Vision processing...")
+                        status.write("📷 Downscaling & compressing image for fast Vision processing...")
                         base64_image = encode_image(image)
                         current_year = datetime.date.today().year
 
@@ -333,19 +333,20 @@ if active_user_id or st.session_state.admin:
                         }}
                         """
 
-                        status.write("⚡ Dispatching requests concurrently using API Key #1 and API Key #2...")
+                        status.write("⚡ Dispatching requests concurrently using stable Vision models...")
                         
-                        model_1 = "openrouter/free"
-                        model_2 = "google/gemini-2.0-flash-exp:free"
+                        # Updated to reliable vision-capable models
+                        model_1 = "google/gemini-2.5-flash"
+                        model_2 = "meta-llama/llama-3.2-11b-vision-instruct:free"
 
                         with ThreadPoolExecutor(max_workers=2) as executor:
                             future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, key_1)
                             future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, key_2)
 
-                            status.write("🔍 Model #1 (Key 1) analyzing items...")
+                            status.write(f"🔍 Model #1 ({model_1}) analyzing items...")
                             res_1, err_1 = future_1.result()
 
-                            status.write("🔍 Model #2 (Key 2) cross-checking values...")
+                            status.write(f"🔍 Model #2 ({model_2}) cross-checking values...")
                             res_2, err_2 = future_2.result()
 
                         status.write("⚖️ Comparing outputs from both models...")
