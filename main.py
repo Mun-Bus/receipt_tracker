@@ -14,6 +14,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
+# Fallback vision models list (prioritizes stable free multimodal models)
+FREE_VISION_CANDIDATES = [
+    "qwen/qwen2.5-vl-72b-instruct:free",
+    "meta-llama/llama-3.2-11b-vision-instruct:free",
+    "openrouter/free"
+]
+
 # Initialize Supabase
 @st.cache_resource
 def init_supabase():
@@ -33,46 +40,55 @@ def encode_image(img):
     resized_img.save(buffered, format="JPEG", quality=75, optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-def analyze_receipt(model_id, prompt_text, base64_img, api_key):
-    """Worker function to run receipt extraction via OpenRouter API using a dedicated API key."""
-    try:
-        ai_client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key
-        )
-        response = ai_client.chat.completions.create(
-            model=model_id,
-            extra_headers={
-                "HTTP-Referer": "https://streamlit.io",
-                "X-Title": "Receipt Manager"
-            },
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_img}"
+def analyze_receipt(prompt_text, base64_img, api_key):
+    """Iterates through free vision endpoints until one successfully returns parsed receipt JSON."""
+    ai_client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key
+    )
+    
+    last_err = ""
+    for model_id in FREE_VISION_CANDIDATES:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_id,
+                extra_headers={
+                    "HTTP-Referer": "https://streamlit.io",
+                    "X-Title": "Receipt Manager"
+                },
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_img}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ]
-        )
-        ai_text = response.choices[0].message.content or ""
-        
-        cleaned = re.sub(r"```json\s*", "", ai_text)
-        cleaned = re.sub(r"```\s*", "", cleaned)
-        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        
-        if json_match:
-            return json.loads(json_match.group(0)), None
-        else:
-            return None, f"No valid JSON returned ({ai_text[:80]}...)"
-    except Exception as e:
-        return None, str(e)
+                        ]
+                    }
+                ]
+            )
+            ai_text = response.choices[0].message.content or ""
+            
+            cleaned = re.sub(r"```json\s*", "", ai_text)
+            cleaned = re.sub(r"```\s*", "", cleaned)
+            json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            
+            if json_match:
+                data = json.loads(json_match.group(0))
+                # Verify payload contains actual receipt extraction keys
+                if any(k in data for k in ["total_amount", "items", "subtotal", "date"]):
+                    return data, None, model_id
+            
+            last_err = f"Model {model_id} responded without valid receipt JSON"
+        except Exception as e:
+            last_err = f"Model {model_id} error: {str(e)}"
+            continue
+
+    return None, f"All endpoints failed. Last log: {last_err}", None
 
 # Initialize session states
 if "admin" not in st.session_state:
@@ -112,7 +128,7 @@ else:
                 st.session_state.admin = res.user
                 st.success("Admin authenticated!")
                 st.rerun()
-            except Exception as e:
+            except Exception:
                 st.error("Invalid admin credentials.")
 
 # --- MAIN SCREEN ---
@@ -158,19 +174,17 @@ if st.session_state.admin:
     
     admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Financial Dashboard", "⚠️ Audit & Discrepancies", "⚙️ Manage Data"])
 
-    # Fetch master records safely with fallback handling
     master_data = []
     try:
         master_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
         master_data = master_resp.data or []
-    except Exception as e:
+    except Exception:
         try:
             master_resp = supabase.table("receipts").select("*").execute()
             master_data = master_resp.data or []
         except Exception:
             master_data = []
 
-    # Process Master Data
     all_receipts_df = pd.DataFrame(master_data)
     all_items_list = []
 
@@ -310,8 +324,8 @@ if active_user_id or st.session_state.admin:
                 if not key_1 or not key_2:
                     st.error("⚠️ Missing API keys! Please define OPENROUTER_API_KEY_1 and OPENROUTER_API_KEY_2 in Streamlit Secrets.")
                 else:
-                    with st.status("🤖 Running dual AI extraction & verification...", expanded=True) as status:
-                        status.write("📷 Downscaling & compressing image for fast Vision processing...")
+                    with st.status("🤖 Running dual AI extraction & endpoint auto-retry...", expanded=True) as status:
+                        status.write("📷 Downscaling & compressing image payload...")
                         base64_image = encode_image(image)
                         current_year = datetime.date.today().year
 
@@ -333,56 +347,47 @@ if active_user_id or st.session_state.admin:
                         }}
                         """
 
-                        status.write("⚡ Dispatching requests concurrently using stable Vision models...")
-                        
-                        # Updated to reliable vision-capable models
-                        model_1 = "google/gemini-2.5-flash"
-                        model_2 = "meta-llama/llama-3.2-11b-vision-instruct:free"
+                        status.write("⚡ Dispatching to free vision candidates with fallback retries...")
 
                         with ThreadPoolExecutor(max_workers=2) as executor:
-                            future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, key_1)
-                            future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, key_2)
+                            future_1 = executor.submit(analyze_receipt, prompt, base64_image, key_1)
+                            future_2 = executor.submit(analyze_receipt, prompt, base64_image, key_2)
 
-                            status.write(f"🔍 Model #1 ({model_1}) analyzing items...")
-                            res_1, err_1 = future_1.result()
+                            res_1, err_1, used_model_1 = future_1.result()
+                            res_2, err_2, used_model_2 = future_2.result()
 
-                            status.write(f"🔍 Model #2 ({model_2}) cross-checking values...")
-                            res_2, err_2 = future_2.result()
-
-                        status.write("⚖️ Comparing outputs from both models...")
-
-                        if err_1:
-                            status.write(f"⚠️ Model #1 log: {err_1}")
-                        if err_2:
-                            status.write(f"⚠️ Model #2 log: {err_2}")
+                        status.write("⚖️ Validating outputs from responsive endpoints...")
 
                         final_json = None
                         if res_1 and res_2:
                             d1, d2 = res_1.get("date"), res_2.get("date")
                             s1, s2 = float(res_1.get("subtotal", 0)), float(res_2.get("subtotal", 0))
                             t1, t2 = float(res_1.get("total_amount", 0)), float(res_2.get("total_amount", 0))
-                            i1, i2 = len(res_1.get("items", [])), len(res_2.get("items", []))
 
-                            if d1 == d2 and abs(s1 - s2) < 0.01 and abs(t1 - t2) < 0.01 and i1 == i2:
+                            if d1 == d2 and abs(s1 - s2) < 0.01 and abs(t1 - t2) < 0.01:
                                 st.session_state.verification_status = "MATCH"
-                                status.update(label="✅ Dual AI analysis complete — Perfect Match Verified!", state="complete", expanded=False)
+                                status.update(label=f"✅ Verified Match! ({used_model_1} & {used_model_2})", state="complete", expanded=False)
                             else:
                                 st.session_state.verification_status = "MISMATCH"
-                                status.update(label="⚠️ Dual AI complete — Minor differences found (using Model #1)", state="complete", expanded=False)
+                                status.update(label=f"⚠️ Extracted successfully using {used_model_1} (minor mismatch with worker #2)", state="complete", expanded=False)
                             final_json = res_1
 
                         elif res_1:
                             final_json = res_1
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label="✅ Analysis complete (Model #1 succeeded)", state="complete", expanded=False)
+                            status.update(label=f"✅ Extracted successfully via {used_model_1}", state="complete", expanded=False)
 
                         elif res_2:
                             final_json = res_2
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label="✅ Analysis complete (Model #2 succeeded)", state="complete", expanded=False)
+                            status.update(label=f"✅ Extracted successfully via {used_model_2}", state="complete", expanded=False)
 
                         else:
-                            status.update(label="❌ AI extraction failed on both models", state="error")
+                            status.update(label="❌ Extraction failed across all free vision candidates.", state="error")
+                            if err_1:
+                                st.error(f"Worker 1 Log: {err_1}")
+                            if err_2:
+                                st.error(f"Worker 2 Log: {err_2}")
 
                         if final_json:
                             extracted_date_str = final_json.get("date", "")
@@ -404,11 +409,10 @@ if active_user_id or st.session_state.admin:
                             st.session_state.processed_file_id = file_id
                             st.rerun()
 
-            # Display verification banner
             if st.session_state.verification_status == "MATCH":
-                st.success("✅ **Dual AI Verification Passed:** Both models returned identical results.")
+                st.success("✅ **Dual Verification Passed:** Both vision workers successfully extracted matching data.")
             elif st.session_state.verification_status == "MISMATCH":
-                st.warning("⚠️ **Dual AI Notice:** Minor discrepancies detected between models. Using primary model output.")
+                st.warning("⚠️ **Notice:** Minor differences detected between models. Using primary output.")
 
             st.write("**Verify Data (Read-Only Review):**")
             
