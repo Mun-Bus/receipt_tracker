@@ -30,7 +30,7 @@ def encode_image(img):
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def analyze_receipt(model_id, prompt_text, base64_img, api_key):
-    """Worker function to run receipt extraction via OpenRouter API."""
+    """Worker function to run receipt extraction via OpenRouter API using a dedicated API key."""
     try:
         ai_client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -167,8 +167,12 @@ if active_user_id or st.session_state.admin:
             file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
             if st.session_state.processed_file_id != file_id:
-                if "OPENROUTER_API_KEY" not in st.secrets or not st.secrets["OPENROUTER_API_KEY"]:
-                    st.error("⚠️ OPENROUTER_API_KEY missing in Streamlit Secrets!")
+                # Retrieve both API keys from Streamlit secrets (or fallback to single key)
+                key_1 = st.secrets.get("OPENROUTER_API_KEY_1", st.secrets.get("OPENROUTER_API_KEY"))
+                key_2 = st.secrets.get("OPENROUTER_API_KEY_2", st.secrets.get("OPENROUTER_API_KEY"))
+
+                if not key_1 or not key_2:
+                    st.error("⚠️ Missing API keys! Please define OPENROUTER_API_KEY_1 and OPENROUTER_API_KEY_2 in Streamlit Secrets.")
                 else:
                     with st.status("🤖 Running dual AI extraction & verification...", expanded=True) as status:
                         status.write("📷 Encoding image for Vision processing...")
@@ -193,21 +197,20 @@ if active_user_id or st.session_state.admin:
                         }}
                         """
 
-                        status.write("⚡ Dispatching Model #1 and Model #2 concurrently...")
-                        api_key = st.secrets["OPENROUTER_API_KEY"]
+                        status.write("⚡ Dispatching requests concurrently using API Key #1 and API Key #2...")
                         
-                        # Use free-tier compatible vision endpoints on OpenRouter
                         model_1 = "openrouter/free"
                         model_2 = "google/gemini-2.0-flash-exp:free"
 
+                        # Executing simultaneously across threads with separate API keys
                         with ThreadPoolExecutor(max_workers=2) as executor:
-                            future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, api_key)
-                            future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, api_key)
+                            future_1 = executor.submit(analyze_receipt, model_1, prompt, base64_image, key_1)
+                            future_2 = executor.submit(analyze_receipt, model_2, prompt, base64_image, key_2)
 
-                            status.write("🔍 Model #1 analyzing items and prices...")
+                            status.write("🔍 Model #1 (Key 1) analyzing items...")
                             res_1, err_1 = future_1.result()
 
-                            status.write("🔍 Model #2 cross-checking values...")
+                            status.write("🔍 Model #2 (Key 2) cross-checking values...")
                             res_2, err_2 = future_2.result()
 
                         status.write("⚖️ Comparing outputs from both models...")
@@ -229,7 +232,7 @@ if active_user_id or st.session_state.admin:
                                 status.update(label="✅ Dual AI analysis complete — Perfect Match Verified!", state="complete", expanded=False)
                             else:
                                 st.session_state.verification_status = "MISMATCH"
-                                status.update(label="⚠️ Dual AI complete — Discrepancies detected (using Model #1)", state="complete", expanded=False)
+                                status.update(label="⚠️ Dual AI complete — Minor differences found (using Model #1)", state="complete", expanded=False)
                             final_json = res_1
 
                         elif res_1:
