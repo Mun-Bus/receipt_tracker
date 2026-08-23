@@ -97,7 +97,7 @@ if st.session_state.admin:
         st.rerun()
 else:
     with st.sidebar.expander("🔑 Admin Login", expanded=False):
-        admin_email = st.text_input("Admin Email, type=email")
+        admin_email = st.text_input("Admin Email", type="email")
         admin_password = st.text_input("Password", type="password")
         if st.button("Authenticate Admin"):
             try:
