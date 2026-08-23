@@ -257,6 +257,7 @@ if st.session_state.admin:
             "editable": False,
             "height": 420,
             "aspectRatio": 1.8,
+            "timeZone": "UTC",  # Locks date calculation to UTC to prevent offset shifts
         }
 
         cal_col_left, cal_col_center, cal_col_right = st.columns([0.1, 0.8, 0.1])
@@ -264,10 +265,10 @@ if st.session_state.admin:
         with cal_col_center:
             cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
 
-        # Safely capture date click or event click
+        # Capture clicks safely in UTC
         if cal_output.get("dateClick"):
             click_data = cal_output["dateClick"]
-            raw_date = click_data.get("date") or click_data.get("dateStr")
+            raw_date = click_data.get("dateStr") or click_data.get("date")
             if raw_date:
                 clicked_date = str(raw_date).split("T")[0]
                 if st.session_state.selected_calendar_date != clicked_date:
