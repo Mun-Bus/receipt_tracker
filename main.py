@@ -140,28 +140,25 @@ user_options = {
 }
 user_lookup = {v: k for k, v in user_options.items()}
 
-col_select, col_add = st.columns([2, 1])
+# Profile selection naturally stacks on mobile portrait
+selected_name = st.selectbox(
+    "Select User Profile",
+    options=["-- Select Your Name --"] + list(user_options.keys())
+)
 
-with col_select:
-    selected_name = st.selectbox(
-        "Select User Profile",
-        options=["-- Select Your Name --"] + list(user_options.keys())
-    )
-
-with col_add:
-    with st.expander("➕ Add New User"):
-        new_first = st.text_input("First Name")
-        new_last = st.text_input("Last Name")
-        if st.button("Create Profile"):
-            if new_first:
-                supabase.table("users").insert({
-                    "first_name": new_first,
-                    "last_name": new_last
-                }).execute()
-                st.success(f"Added {new_first}!")
-                st.rerun()
-            else:
-                st.warning("First name required.")
+with st.expander("➕ Add New User"):
+    new_first = st.text_input("First Name")
+    new_last = st.text_input("Last Name")
+    if st.button("Create Profile"):
+        if new_first:
+            supabase.table("users").insert({
+                "first_name": new_first,
+                "last_name": new_last
+            }).execute()
+            st.success(f"Added {new_first}!")
+            st.rerun()
+        else:
+            st.warning("First name required.")
 
 active_user_id = user_options.get(selected_name) if selected_name != "-- Select Your Name --" else None
 
@@ -171,10 +168,10 @@ if st.session_state.admin:
     st.subheader("👑 Admin Command Center")
     
     admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs([
-        "📅 Interactive Calendar", 
-        "📊 Financial Dashboard", 
-        "⚠️ Audit & Discrepancies", 
-        "⚙️ Manage Data"
+        "📅 Calendar", 
+        "📊 Dashboard", 
+        "⚠️ Audit", 
+        "⚙️ Data"
     ])
 
     try:
@@ -229,16 +226,16 @@ if st.session_state.admin:
     else:
         all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
-    # --- TAB 1: INTERACTIVE FULLCALENDAR (COMPACT VERSION) ---
+    # --- TAB 1: INTERACTIVE FULLCALENDAR (MOBILE PORTRAIT OPTIMIZED) ---
     with admin_tab1:
-        st.write("**🗓️ Spending Calendar (Click any day or event box to view breakdown)**")
+        st.write("**🗓️ Spending Calendar (Click day to view details)**")
         
         calendar_events = []
         if not all_receipts_df.empty:
             day_totals = all_receipts_df.groupby("date")["total_amount"].sum().reset_index()
             for _, row in day_totals.iterrows():
                 calendar_events.append({
-                    "title": f"Spent: ${row['total_amount']:.2f}",
+                    "title": f"${row['total_amount']:.2f}",
                     "start": str(row["date"]),
                     "end": str(row["date"]),
                     "allDay": True,
@@ -248,24 +245,21 @@ if st.session_state.admin:
 
         calendar_options = {
             "headerToolbar": {
-                "left": "prev,next today",
+                "left": "prev,next",
                 "center": "title",
-                "right": "dayGridMonth"
+                "right": "today"
             },
             "initialView": "dayGridMonth",
             "selectable": True,
             "editable": False,
-            "height": 420,
-            "aspectRatio": 1.8,
-            "timeZone": "UTC",  # Locks date calculation to UTC to prevent offset shifts
+            "height": 380,
+            "contentHeight": 340,
+            "timeZone": "UTC",
         }
 
-        cal_col_left, cal_col_center, cal_col_right = st.columns([0.1, 0.8, 0.1])
+        # Render direct full width for seamless vertical stacking on mobile
+        cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
 
-        with cal_col_center:
-            cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
-
-        # Capture clicks safely in UTC
         if cal_output.get("dateClick"):
             click_data = cal_output["dateClick"]
             raw_date = click_data.get("dateStr") or click_data.get("date")
@@ -287,22 +281,21 @@ if st.session_state.admin:
 
         active_date = st.session_state.selected_calendar_date
         if active_date:
-            st.subheader(f"📌 Detailed Breakdown for {active_date}")
+            st.subheader(f"📌 Breakdown for {active_date}")
             
             day_recs = all_receipts_df[all_receipts_df["date"] == active_date] if not all_receipts_df.empty else pd.DataFrame()
             day_its = all_items_df[all_items_df["date"] == active_date] if not all_items_df.empty else pd.DataFrame()
 
             if not day_recs.empty:
-                c1, c2 = st.columns(2)
-                c1.metric("Day Total Spending", f"${day_recs['total_amount'].sum():,.2f}")
-                c2.metric("Receipts Logged", len(day_recs))
+                st.metric("Day Total Spending", f"${day_recs['total_amount'].sum():,.2f}")
+                st.metric("Receipts Logged", len(day_recs))
 
                 st.write("---")
                 st.write("**🛒 Items Purchased on this Day:**")
                 if not day_its.empty:
                     st.dataframe(
                         day_its[["item_name", "price", "receipt_id"]],
-                        width="stretch",
+                        use_container_width=True,
                         hide_index=True,
                         column_config={
                             "item_name": st.column_config.TextColumn("Product / Item"),
@@ -327,18 +320,17 @@ if st.session_state.admin:
     with admin_tab2:
         if not all_receipts_df.empty:
             months_available = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
-            selected_month = st.selectbox("📅 Select Spending Period (Month)", options=["All Time"] + list(months_available), key="fin_dash_month")
+            selected_month = st.selectbox("📅 Select Period (Month)", options=["All Time"] + list(months_available), key="fin_dash_month")
 
             filtered_df = all_receipts_df if selected_month == "All Time" else all_receipts_df[all_receipts_df["month_year"] == selected_month]
             filtered_items = all_items_df if selected_month == "All Time" or all_items_df.empty else all_items_df[all_items_df["month_year"] == selected_month]
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Total Spending", f"${filtered_df['total_amount'].sum():,.2f}")
-            m2.metric("Receipt Count", len(filtered_df))
-            m3.metric("Flagged Discrepancies", int(filtered_df['is_discrepant'].sum()) if 'is_discrepant' in filtered_df else 0)
+            st.metric("Total Spending", f"${filtered_df['total_amount'].sum():,.2f}")
+            st.metric("Receipt Count", len(filtered_df))
+            st.metric("Flagged Discrepancies", int(filtered_df['is_discrepant'].sum()) if 'is_discrepant' in filtered_df else 0)
 
             st.write("---")
-            st.write("**🛒 Itemized Breakdown (e.g., Apple, Bread Spending)**")
+            st.write("**🛒 Itemized Breakdown**")
             if not filtered_items.empty:
                 item_group = filtered_items.groupby("item_name").agg(
                     Total_Spent=("price", "sum"),
@@ -348,13 +340,13 @@ if st.session_state.admin:
 
                 st.dataframe(
                     item_group,
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         "item_name": st.column_config.TextColumn("Product / Item"),
-                        "Total_Spent": st.column_config.NumberColumn("Total Spent ($)", format="$%.2f"),
-                        "Times_Purchased": st.column_config.NumberColumn("Quantity Count"),
-                        "Avg_Price": st.column_config.NumberColumn("Average Price ($)", format="$%.2f")
+                        "Total_Spent": st.column_config.NumberColumn("Total ($)", format="$%.2f"),
+                        "Times_Purchased": st.column_config.NumberColumn("Count"),
+                        "Avg_Price": st.column_config.NumberColumn("Avg ($)", format="$%.2f")
                     }
                 )
             else:
@@ -368,49 +360,47 @@ if st.session_state.admin:
         if not all_receipts_df.empty and "is_discrepant" in all_receipts_df:
             flagged = all_receipts_df[all_receipts_df["is_discrepant"] == True]
             if not flagged.empty:
-                st.warning(f"Found {len(flagged)} receipt(s) where the total amount does not match the sum of individual line items.")
+                st.warning(f"Found {len(flagged)} receipt(s) with price mismatches.")
                 st.dataframe(
                     flagged[["id", "user_id", "date", "subtotal", "total_amount", "items_sum", "discrepancy"]],
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         "subtotal": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f"),
-                        "total_amount": st.column_config.NumberColumn("Receipt Total ($)", format="$%.2f"),
+                        "total_amount": st.column_config.NumberColumn("Total ($)", format="$%.2f"),
                         "items_sum": st.column_config.NumberColumn("Item Sum ($)", format="$%.2f"),
-                        "discrepancy": st.column_config.NumberColumn("Difference ($)", format="$%.2f")
+                        "discrepancy": st.column_config.NumberColumn("Diff ($)", format="$%.2f")
                     }
                 )
             else:
-                st.success("✅ All receipts pass sum audit! Item totals match final totals.")
+                st.success("✅ All receipts pass sum audit!")
         else:
             st.info("No records available to audit.")
 
     # --- TAB 4: MANAGE & DELETE DATA ---
     with admin_tab4:
-        col_del_user, col_del_rec = st.columns(2)
+        st.write("🗑️ **Delete User Profile**")
+        user_to_delete = st.selectbox("Select User to Remove", options=["-- Choose User --"] + list(user_options.keys()))
+        if st.button("Delete User Profile", type="primary"):
+            if user_to_delete != "-- Choose User --":
+                u_id = user_options[user_to_delete]
+                supabase.table("users").delete().eq("id", u_id).execute()
+                st.success(f"User '{user_to_delete}' removed successfully!")
+                st.rerun()
 
-        with col_del_user:
-            st.write("🗑️ **Delete User Profile**")
-            user_to_delete = st.selectbox("Select User to Remove", options=["-- Choose User --"] + list(user_options.keys()))
-            if st.button("Delete User Profile", type="primary"):
-                if user_to_delete != "-- Choose User --":
-                    u_id = user_options[user_to_delete]
-                    supabase.table("users").delete().eq("id", u_id).execute()
-                    st.success(f"User '{user_to_delete}' removed successfully!")
+        st.divider()
+
+        st.write("🗑️ **Delete Specific Receipt**")
+        if not all_receipts_df.empty:
+            receipt_list = [f"ID: {r['id']} | Date: {r['date']} | Total: ${r['total_amount']}" for r in receipts_data]
+            selected_rec = st.selectbox("Select Receipt to Remove", options=["-- Choose Receipt --"] + receipt_list)
+            if st.button("Delete Selected Receipt", type="primary"):
+                if selected_rec != "-- Choose Receipt --":
+                    rec_id = selected_rec.split("ID: ")[1].split(" |")[0]
+                    supabase.table("receipt_items").delete().eq("receipt_id", rec_id).execute()
+                    supabase.table("receipts").delete().eq("id", rec_id).execute()
+                    st.success("Receipt deleted successfully!")
                     st.rerun()
-
-        with col_del_rec:
-            st.write("🗑️ **Delete Specific Receipt**")
-            if not all_receipts_df.empty:
-                receipt_list = [f"ID: {r['id']} | Date: {r['date']} | Total: ${r['total_amount']}" for r in receipts_data]
-                selected_rec = st.selectbox("Select Receipt to Remove", options=["-- Choose Receipt --"] + receipt_list)
-                if st.button("Delete Selected Receipt", type="primary"):
-                    if selected_rec != "-- Choose Receipt --":
-                        rec_id = selected_rec.split("ID: ")[1].split(" |")[0]
-                        supabase.table("receipt_items").delete().eq("receipt_id", rec_id).execute()
-                        supabase.table("receipts").delete().eq("id", rec_id).execute()
-                        st.success("Receipt deleted successfully!")
-                        st.rerun()
 
 # --- WORKFLOW SECTION ---
 if active_user_id or st.session_state.admin:
@@ -428,7 +418,7 @@ if active_user_id or st.session_state.admin:
 
         if uploaded_file is not None:
             image = Image.open(uploaded_file).convert("RGB")
-            st.image(image, caption="Uploaded Receipt", width=300)
+            st.image(image, caption="Uploaded Receipt", use_container_width=True)
 
             file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
@@ -439,8 +429,7 @@ if active_user_id or st.session_state.admin:
                 if not key_1 or not key_2:
                     st.error("⚠️ Missing API keys! Please define OPENROUTER_API_KEY_1 and OPENROUTER_API_KEY_2 in Streamlit Secrets.")
                 else:
-                    with st.status("🤖 Running dual AI extraction & endpoint auto-retry...", expanded=True) as status:
-                        status.write("📷 Downscaling & compressing image payload...")
+                    with st.status("🤖 Extracting receipt details...", expanded=True) as status:
                         base64_image = encode_image(image)
                         current_year = datetime.date.today().year
 
@@ -462,16 +451,12 @@ if active_user_id or st.session_state.admin:
                         }}
                         """
 
-                        status.write("⚡ Dispatching to free vision candidates with fallback retries...")
-
                         with ThreadPoolExecutor(max_workers=2) as executor:
                             future_1 = executor.submit(analyze_receipt, prompt, base64_image, key_1)
                             future_2 = executor.submit(analyze_receipt, prompt, base64_image, key_2)
 
                             res_1, err_1, used_model_1 = future_1.result()
                             res_2, err_2, used_model_2 = future_2.result()
-
-                        status.write("⚖️ Validating outputs from responsive endpoints...")
 
                         final_json = None
                         if res_1 and res_2:
@@ -481,24 +466,24 @@ if active_user_id or st.session_state.admin:
 
                             if d1 == d2 and abs(s1 - s2) < 0.01 and abs(t1 - t2) < 0.01:
                                 st.session_state.verification_status = "MATCH"
-                                status.update(label=f"✅ Verified Match! ({used_model_1} & {used_model_2})", state="complete", expanded=False)
+                                status.update(label=f"✅ Verified Match!", state="complete", expanded=False)
                             else:
                                 st.session_state.verification_status = "MISMATCH"
-                                status.update(label=f"⚠️ Extracted successfully using {used_model_1} (minor mismatch with worker #2)", state="complete", expanded=False)
+                                status.update(label=f"⚠️ Extracted successfully", state="complete", expanded=False)
                             final_json = res_1
 
                         elif res_1:
                             final_json = res_1
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label=f"✅ Extracted successfully via {used_model_1}", state="complete", expanded=False)
+                            status.update(label=f"✅ Extracted successfully", state="complete", expanded=False)
 
                         elif res_2:
                             final_json = res_2
                             st.session_state.verification_status = "SINGLE"
-                            status.update(label=f"✅ Extracted successfully via {used_model_2}", state="complete", expanded=False)
+                            status.update(label=f"✅ Extracted successfully", state="complete", expanded=False)
 
                         else:
-                            status.update(label="❌ Extraction failed across all free vision candidates.", state="error")
+                            status.update(label="❌ Extraction failed across candidates.", state="error")
                             if err_1:
                                 st.error(f"Worker 1 Log: {err_1}")
                             if err_2:
@@ -525,16 +510,15 @@ if active_user_id or st.session_state.admin:
                             st.rerun()
 
             if st.session_state.verification_status == "MATCH":
-                st.success("✅ **Dual Verification Passed:** Both vision workers successfully extracted matching data.")
+                st.success("✅ **Dual Verification Passed**")
             elif st.session_state.verification_status == "MISMATCH":
-                st.warning("⚠️ **Notice:** Minor differences detected between models. Using primary output.")
+                st.warning("⚠️ **Notice:** Minor differences detected between models.")
 
-            st.write("**Verify Data (Read-Only Review):**")
+            st.write("**Verify Data:**")
             
-            st.write("Products Purchased:")
             st.dataframe(
                 st.session_state.extracted_items_df,
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
                 column_config={
                     "item_name": st.column_config.TextColumn("Product Name"),
