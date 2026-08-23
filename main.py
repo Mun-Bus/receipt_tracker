@@ -140,7 +140,6 @@ user_options = {
 }
 user_lookup = {v: k for k, v in user_options.items()}
 
-# Profile selection naturally stacks on mobile portrait
 selected_name = st.selectbox(
     "Select User Profile",
     options=["-- Select Your Name --"] + list(user_options.keys())
@@ -226,7 +225,7 @@ if st.session_state.admin:
     else:
         all_items_df = pd.DataFrame(columns=["receipt_id", "user_id", "date", "month_year", "item_name", "price"])
 
-    # --- TAB 1: INTERACTIVE FULLCALENDAR (MOBILE PORTRAIT OPTIMIZED) ---
+    # --- TAB 1: INTERACTIVE FULLCALENDAR ---
     with admin_tab1:
         st.write("**🗓️ Spending Calendar (Click day to view details)**")
         
@@ -257,7 +256,6 @@ if st.session_state.admin:
             "timeZone": "UTC",
         }
 
-        # Render direct full width for seamless vertical stacking on mobile
         cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
 
         if cal_output.get("dateClick"):
@@ -582,7 +580,7 @@ if active_user_id or st.session_state.admin:
 
         st.divider()
 
-    # 2. SPREADSHEET VIEWER
+    # 2. SPREADSHEET VIEWER (MOBILE PORTRAIT OPTIMIZED)
     st.subheader("2. Ranked Receipts Spreadsheet")
 
     try:
@@ -616,15 +614,35 @@ if active_user_id or st.session_state.admin:
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
-        display_cols = ["Rank", "user_id", "date", "items", "subtotal", "total_amount", "created_at", "image_url"]
+        display_cols = ["Rank", "date", "total_amount", "items", "subtotal", "user_id", "image_url"]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
+        # AgGrid Mobile Portrait Settings
         gb = GridOptionsBuilder.from_dataframe(df_display)
-        gb.configure_pagination(paginationAutoPageSize=True)
-        gb.configure_default_column(editable=False, groupable=True)
+        gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=5)
+        gb.configure_default_column(
+            editable=False, 
+            groupable=False, 
+            resizable=True,
+            wrapText=True,
+            autoHeight=True
+        )
+        
+        # Optimize key mobile column widths
+        gb.configure_column("Rank", width=70)
+        gb.configure_column("date", headerName="Date", width=110)
+        gb.configure_column("total_amount", headerName="Total ($)", width=100)
+        
         gridOptions = gb.build()
 
-        AgGrid(df_display, gridOptions=gridOptions, height=350, theme="alpine")
+        AgGrid(
+            df_display, 
+            gridOptions=gridOptions, 
+            height=320, 
+            theme="alpine",
+            use_container_width=True,
+            fit_columns_on_grid_load=True
+        )
     else:
         st.info("No receipts found for this view.")
 else:
