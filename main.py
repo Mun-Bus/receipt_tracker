@@ -13,8 +13,8 @@ st.set_page_config(page_title="Receipt Manager", layout="wide")
 # Initialize Supabase client using secrets
 @st.cache_resource
 def init_supabase():
-    url = st.secrets["https://wewmtirfaynztonxvjbe.supabase.co"]
-    key = st.secrets["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indld210aXJmYXluenRvbnh2amJlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0NjI2MDIsImV4cCI6MjEwMzAzODYwMn0.0s3Yy9V3iritYB2l_GikDezwAkV-rWSzhOhDr0EMGpA"]
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
 
 supabase = init_supabase()
