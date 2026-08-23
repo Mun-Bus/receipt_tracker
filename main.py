@@ -23,12 +23,6 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# Initialize OpenRouter Client
-ai_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=st.secrets["OPENROUTER_API_KEY"]
-)
-
 # Helper function to convert PIL Image to Base64
 def encode_image(img):
     buffered = io.BytesIO()
@@ -38,8 +32,14 @@ def encode_image(img):
 # Initialize session states
 if "admin" not in st.session_state:
     st.session_state.admin = None
-if "extracted_data" not in st.session_state:
-    st.session_state.extracted_data = {}
+if "extracted_subtotal" not in st.session_state:
+    st.session_state.extracted_subtotal = 0.0
+if "extracted_extra" not in st.session_state:
+    st.session_state.extracted_extra = 0.0
+if "extracted_total" not in st.session_state:
+    st.session_state.extracted_total = 0.0
+if "extracted_items" not in st.session_state:
+    st.session_state.extracted_items = ""
 if "processed_file_id" not in st.session_state:
     st.session_state.processed_file_id = None
 
@@ -120,77 +120,84 @@ if active_user_id or st.session_state.admin:
             image = Image.open(uploaded_file).convert("RGB")
             st.image(image, caption="Uploaded Receipt", width=300)
 
-            # Unique key to avoid re-running AI on unchanged upload
             file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
             if st.session_state.processed_file_id != file_id:
-                with st.spinner("Analyzing receipt items & totals with Vision AI..."):
-                    base64_image = encode_image(image)
-                    
-                    prompt = """
-                    Analyze this receipt image in detail. Extract the following:
-                    1. items: List of all products/services bought with their price (e.g. ["Item A - $5.00", "Item B - $2.50"])
-                    2. subtotal: The subtotal amount (numeric)
-                    3. extra_amount: Any tax, tip, or service fee (numeric, 0.0 if none)
-                    4. total_amount: The grand total amount (numeric)
-
-                    Return ONLY a JSON object with this exact structure:
-                    {
-                        "items": ["Product 1 - $10.00", "Product 2 - $5.00"],
-                        "subtotal": 15.00,
-                        "extra_amount": 1.50,
-                        "total_amount": 16.50
-                    }
-                    """
-
-                    try:
-                        response = ai_client.chat.completions.create(
-                            model="google/gemma-3-27b-it:free",
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {
-                                                "url": f"data:image/jpeg;base64,{base64_image}"
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
-                        )
-
-                        ai_text = response.choices[0].message.content
-                        json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                if "OPENROUTER_API_KEY" not in st.secrets or not st.secrets["OPENROUTER_API_KEY"]:
+                    st.error("⚠️ OPENROUTER_API_KEY is missing in Streamlit Cloud Secrets!")
+                else:
+                    with st.spinner("Analyzing receipt items & totals with Vision AI..."):
+                        base64_image = encode_image(image)
                         
-                        if json_match:
-                            extracted = json.loads(json_match.group(0))
-                            items_list = extracted.get("items", [])
-                            items_formatted = "\n".join(items_list) if isinstance(items_list, list) else str(items_list)
+                        prompt = """
+                        Analyze this receipt image carefully. Extract:
+                        1. items: List all purchased items with prices (e.g. ["Milk - $3.50", "Bread - $2.00"])
+                        2. subtotal: Pre-tax/fee total (numeric)
+                        3. extra_amount: Tax, tip, or service fees (numeric, 0.0 if none)
+                        4. total_amount: Final grand total (numeric)
+
+                        Return ONLY valid JSON matching this exact structure:
+                        {
+                            "items": ["Item 1 - $5.00", "Item 2 - $3.00"],
+                            "subtotal": 8.00,
+                            "extra_amount": 0.80,
+                            "total_amount": 8.80
+                        }
+                        """
+
+                        try:
+                            ai_client = OpenAI(
+                                base_url="https://openrouter.ai/api/v1",
+                                api_key=st.secrets["OPENROUTER_API_KEY"]
+                            )
+
+                            response = ai_client.chat.completions.create(
+                                model="openrouter/free",
+                                extra_headers={
+                                    "HTTP-Referer": "https://streamlit.io",
+                                    "X-Title": "Receipt Manager"
+                                },
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": prompt},
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            )
+
+                            ai_text = response.choices[0].message.content
+                            json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
                             
-                            st.session_state.extracted_data = {
-                                "subtotal": float(extracted.get("subtotal", 0.0)),
-                                "extra_amount": float(extracted.get("extra_amount", 0.0)),
-                                "total_amount": float(extracted.get("total_amount", 0.0)),
-                                "items": items_formatted
-                            }
-                        st.session_state.processed_file_id = file_id
+                            if json_match:
+                                extracted = json.loads(json_match.group(0))
+                                items_list = extracted.get("items", [])
+                                items_formatted = "\n".join(items_list) if isinstance(items_list, list) else str(items_list)
+                                
+                                st.session_state.extracted_subtotal = float(extracted.get("subtotal", 0.0))
+                                st.session_state.extracted_extra = float(extracted.get("extra_amount", 0.0))
+                                st.session_state.extracted_total = float(extracted.get("total_amount", 0.0))
+                                st.session_state.extracted_items = items_formatted
+                                st.session_state.processed_file_id = file_id
+                                st.rerun()
 
-                    except Exception as e:
-                        st.error(f"AI extraction error: {e}")
-
-            # Retrieve processed state
-            ext_data = st.session_state.get("extracted_data", {})
+                        except Exception as e:
+                            st.error(f"AI extraction error: {e}")
 
             st.write("**Verify Data:**")
             with st.form("receipt_form"):
                 rec_date = st.date_input("Date", value=datetime.date.today())
-                subtotal = st.number_input("Subtotal ($)", value=ext_data.get("subtotal", 0.0), step=0.01)
-                extra_amount = st.number_input("Extra Amount / Tax / Tip ($)", value=ext_data.get("extra_amount", 0.0), step=0.01)
-                total_amount = st.number_input("Total Amount ($)", value=ext_data.get("total_amount", 0.0), step=0.01)
-                items_text = st.text_area("Products Bought", value=ext_data.get("items", ""), height=120)
+                subtotal = st.number_input("Subtotal ($)", value=st.session_state.extracted_subtotal, step=0.01)
+                extra_amount = st.number_input("Extra Amount / Tax / Tip ($)", value=st.session_state.extracted_extra, step=0.01)
+                total_amount = st.number_input("Total Amount ($)", value=st.session_state.extracted_total, step=0.01)
+                items_text = st.text_area("Products Bought", value=st.session_state.extracted_items, height=120)
                 
                 submit_btn = st.form_submit_button("Save Receipt")
 
@@ -215,9 +222,12 @@ if active_user_id or st.session_state.admin:
                     supabase.table("receipts").insert(receipt_payload).execute()
                     st.success("Receipt saved!")
                     
-                    # Reset state for next upload
+                    # Reset state
                     st.session_state.processed_file_id = None
-                    st.session_state.extracted_data = {}
+                    st.session_state.extracted_subtotal = 0.0
+                    st.session_state.extracted_extra = 0.0
+                    st.session_state.extracted_total = 0.0
+                    st.session_state.extracted_items = ""
                     st.rerun()
                 except Exception as err:
                     st.error(f"Save error: {err}")
