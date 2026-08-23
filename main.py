@@ -123,7 +123,7 @@ if active_user_id or st.session_state.admin:
 
                 try:
                     response = ai_client.chat.completions.create(
-                        model="qwen/qwen-2-vl-7b-instruct:free",
+                        model="openrouter/free",
                         messages=[
                             {
                                 "role": "user",
