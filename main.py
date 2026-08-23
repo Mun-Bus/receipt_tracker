@@ -580,9 +580,7 @@ if active_user_id or st.session_state.admin:
 
         st.divider()
 
-    # 2. SPREADSHEET VIEWER (MOBILE PORTRAIT OPTIMIZED)
-    st.subheader("2. Ranked Receipts Spreadsheet")
-
+    # DATA RETRIEVAL FOR SPREADSHEET AND MONTHLY SUMMARY
     try:
         if st.session_state.admin and not active_user_id:
             rec_resp = supabase.table("receipts").select("*").execute()
@@ -597,53 +595,110 @@ if active_user_id or st.session_state.admin:
         rec_resp = None
         all_items_resp = None
 
+    # 2. SPREADSHEET VIEWER (STRICT 3-COLUMN DISPLAY)
+    st.subheader("2. Ranked Receipts Spreadsheet")
+
     if rec_resp and rec_resp.data:
         df = pd.DataFrame(rec_resp.data)
-        
-        items_dict = {}
-        if all_items_resp and all_items_resp.data:
-            items_df_tmp = pd.DataFrame(all_items_resp.data)
-            if not items_df_tmp.empty and "receipt_id" in items_df_tmp.columns:
-                items_df_tmp["receipt_id"] = items_df_tmp["receipt_id"].astype(str)
-                for r_id, group in items_df_tmp.groupby("receipt_id"):
-                    items_dict[r_id] = ", ".join([f"{row['item_name']} (${row['price']})" for _, row in group.iterrows()])
-
-        df["id"] = df["id"].astype(str)
-        df["items"] = df["id"].apply(lambda r_id: items_dict.get(r_id, ""))
 
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
-        display_cols = ["Rank", "date", "total_amount", "items", "subtotal", "user_id", "image_url"]
+        display_cols = ["Rank", "date", "total_amount"]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
-        # AgGrid Mobile Portrait Settings
         gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=5)
         gb.configure_default_column(
             editable=False, 
             groupable=False, 
-            resizable=True,
-            wrapText=True,
-            autoHeight=True
+            resizable=True
         )
         
-        # Optimize key mobile column widths
-        gb.configure_column("Rank", width=70)
-        gb.configure_column("date", headerName="Date", width=110)
-        gb.configure_column("total_amount", headerName="Total ($)", width=100)
+        gb.configure_column("Rank", headerName="Rank")
+        gb.configure_column("date", headerName="Date")
+        gb.configure_column("total_amount", headerName="Total ($)")
         
         gridOptions = gb.build()
 
         AgGrid(
             df_display, 
             gridOptions=gridOptions, 
-            height=320, 
+            height=280, 
             theme="alpine",
             use_container_width=True,
             fit_columns_on_grid_load=True
         )
     else:
         st.info("No receipts found for this view.")
+
+    st.divider()
+
+    # 3. MONTHLY SUMMARY SECTION
+    st.subheader("3. Monthly Summary")
+
+    if rec_resp and rec_resp.data:
+        df_summary = pd.DataFrame(rec_resp.data)
+        if not df_summary.empty:
+            df_summary["date_dt"] = pd.to_datetime(df_summary["date"], errors="coerce")
+            df_summary["month_year"] = df_summary["date_dt"].dt.strftime("%Y-%m")
+            
+            available_summary_months = sorted(df_summary["month_year"].dropna().unique(), reverse=True)
+            
+            if available_summary_months:
+                selected_sum_month = st.selectbox(
+                    "Select Month", 
+                    options=available_summary_months, 
+                    key="monthly_summary_dropdown"
+                )
+                
+                # Filter receipts by chosen month
+                month_recs = df_summary[df_summary["month_year"] == selected_sum_month]
+                total_month_cost = month_recs["total_amount"].sum()
+                month_rec_ids = month_recs["id"].astype(str).tolist()
+
+                st.metric(label=f"Total Cost Spent in {selected_sum_month}", value=f"${total_month_cost:,.2f}")
+
+                # Retrieve and list all items bought in that month
+                if all_items_resp and all_items_resp.data:
+                    raw_month_items = pd.DataFrame(all_items_resp.data)
+                    if not raw_month_items.empty and "receipt_id" in raw_month_items.columns:
+                        raw_month_items["receipt_id"] = raw_month_items["receipt_id"].astype(str)
+                        
+                        m_items_filtered = raw_month_items[raw_month_items["receipt_id"].isin(month_rec_ids)].copy()
+                        
+                        if not m_items_filtered.empty:
+                            m_items_filtered = m_items_filtered.merge(
+                                month_recs[["id", "date"]], 
+                                left_on="receipt_id", 
+                                right_on="id", 
+                                how="inner"
+                            )
+                            
+                            m_items_filtered["price"] = pd.to_numeric(m_items_filtered["price"], errors="coerce").fillna(0.0)
+                            
+                            st.write("**🛒 All Items Purchased This Month:**")
+                            st.dataframe(
+                                m_items_filtered[["date", "item_name", "price"]],
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "date": st.column_config.TextColumn("Date"),
+                                    "item_name": st.column_config.TextColumn("Item Name"),
+                                    "price": st.column_config.NumberColumn("Price ($)", format="$%.2f")
+                                }
+                            )
+                        else:
+                            st.info("No item details found for this month.")
+                    else:
+                        st.info("No item data logged.")
+                else:
+                    st.info("No items data available.")
+            else:
+                st.info("No dated receipt records available.")
+        else:
+            st.info("No receipt records available for monthly summary.")
+    else:
+        st.info("No receipts recorded yet to build monthly summary.")
 else:
     st.info("Select or add a user profile above, or log in as Admin using the sidebar menu.")
