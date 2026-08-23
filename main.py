@@ -23,7 +23,6 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# Helper function to convert PIL Image to Base64
 def encode_image(img):
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG")
@@ -32,14 +31,16 @@ def encode_image(img):
 # Initialize session states
 if "admin" not in st.session_state:
     st.session_state.admin = None
+if "extracted_date" not in st.session_state:
+    st.session_state.extracted_date = datetime.date.today()
 if "extracted_subtotal" not in st.session_state:
     st.session_state.extracted_subtotal = 0.0
 if "extracted_extra" not in st.session_state:
     st.session_state.extracted_extra = 0.0
 if "extracted_total" not in st.session_state:
     st.session_state.extracted_total = 0.0
-if "extracted_items" not in st.session_state:
-    st.session_state.extracted_items = ""
+if "extracted_items_df" not in st.session_state:
+    st.session_state.extracted_items_df = pd.DataFrame(columns=["item_name", "price"])
 if "processed_file_id" not in st.session_state:
     st.session_state.processed_file_id = None
 
@@ -124,25 +125,29 @@ if active_user_id or st.session_state.admin:
 
             if st.session_state.processed_file_id != file_id:
                 if "OPENROUTER_API_KEY" not in st.secrets or not st.secrets["OPENROUTER_API_KEY"]:
-                    st.error("⚠️ OPENROUTER_API_KEY is missing in Streamlit Cloud Secrets!")
+                    st.error("⚠️ OPENROUTER_API_KEY missing in Streamlit Secrets!")
                 else:
-                    with st.spinner("Analyzing receipt items & totals with Vision AI..."):
+                    with st.spinner("Extracting receipt date, items, and totals..."):
                         base64_image = encode_image(image)
-                        
-                        prompt = """
-                        Analyze this receipt image carefully. Extract:
-                        1. items: List all purchased items with prices (e.g. ["Milk - $3.50", "Bread - $2.00"])
-                        2. subtotal: Pre-tax/fee total (numeric)
-                        3. extra_amount: Tax, tip, or service fees (numeric, 0.0 if none)
-                        4. total_amount: Final grand total (numeric)
+                        current_year = datetime.date.today().year
+
+                        prompt = f"""
+                        Analyze this receipt image.
+                        1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, assume the current year is {current_year}.
+                        2. Extract all items/products with their names and individual prices.
+                        3. Extract subtotal, extra_amount (tax/tip/fees), and final total_amount.
 
                         Return ONLY valid JSON matching this exact structure:
-                        {
-                            "items": ["Item 1 - $5.00", "Item 2 - $3.00"],
-                            "subtotal": 8.00,
-                            "extra_amount": 0.80,
-                            "total_amount": 8.80
-                        }
+                        {{
+                            "date": "YYYY-MM-DD",
+                            "items": [
+                                {{"item_name": "Item A", "price": 5.00}},
+                                {{"item_name": "Item B", "price": 2.50}}
+                            ],
+                            "subtotal": 7.50,
+                            "extra_amount": 0.75,
+                            "total_amount": 8.25
+                        }}
                         """
 
                         try:
@@ -175,16 +180,29 @@ if active_user_id or st.session_state.admin:
 
                             ai_text = response.choices[0].message.content
                             json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
-                            
+
                             if json_match:
                                 extracted = json.loads(json_match.group(0))
-                                items_list = extracted.get("items", [])
-                                items_formatted = "\n".join(items_list) if isinstance(items_list, list) else str(items_list)
-                                
+
+                                # Parse date safely
+                                extracted_date_str = extracted.get("date", "")
+                                try:
+                                    parsed_date = datetime.datetime.strptime(extracted_date_str, "%Y-%m-%d").date()
+                                except ValueError:
+                                    parsed_date = datetime.date.today()
+
+                                # Parse items list into DataFrame
+                                raw_items = extracted.get("items", [])
+                                if isinstance(raw_items, list) and len(raw_items) > 0:
+                                    items_df = pd.DataFrame(raw_items)
+                                else:
+                                    items_df = pd.DataFrame(columns=["item_name", "price"])
+
+                                st.session_state.extracted_date = parsed_date
                                 st.session_state.extracted_subtotal = float(extracted.get("subtotal", 0.0))
                                 st.session_state.extracted_extra = float(extracted.get("extra_amount", 0.0))
                                 st.session_state.extracted_total = float(extracted.get("total_amount", 0.0))
-                                st.session_state.extracted_items = items_formatted
+                                st.session_state.extracted_items_df = items_df
                                 st.session_state.processed_file_id = file_id
                                 st.rerun()
 
@@ -192,13 +210,25 @@ if active_user_id or st.session_state.admin:
                             st.error(f"AI extraction error: {e}")
 
             st.write("**Verify Data:**")
+            
+            # Interactive items table editor
+            st.write("Products Purchased:")
+            edited_items_df = st.data_editor(
+                st.session_state.extracted_items_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "item_name": st.column_config.TextColumn("Product Name"),
+                    "price": st.column_config.NumberColumn("Price ($)", format="$%.2f")
+                }
+            )
+
             with st.form("receipt_form"):
-                rec_date = st.date_input("Date", value=datetime.date.today())
+                rec_date = st.date_input("Date", value=st.session_state.extracted_date)
                 subtotal = st.number_input("Subtotal ($)", value=st.session_state.extracted_subtotal, step=0.01)
                 extra_amount = st.number_input("Extra Amount / Tax / Tip ($)", value=st.session_state.extracted_extra, step=0.01)
                 total_amount = st.number_input("Total Amount ($)", value=st.session_state.extracted_total, step=0.01)
-                items_text = st.text_area("Products Bought", value=st.session_state.extracted_items, height=120)
-                
+
                 submit_btn = st.form_submit_button("Save Receipt")
 
             if submit_btn:
@@ -210,25 +240,45 @@ if active_user_id or st.session_state.admin:
                     supabase.storage.from_("receipts-storage").upload(file_path, bytes_data)
                     public_url = supabase.storage.from_("receipts-storage").get_public_url(file_path)
 
+                    # 1. Insert into 'receipts' table
                     receipt_payload = {
                         "user_id": active_user_id,
                         "date": str(rec_date),
                         "subtotal": subtotal,
                         "total_amount": total_amount,
                         "extra_amount": extra_amount,
-                        "items": items_text,
                         "image_url": public_url
                     }
-                    supabase.table("receipts").insert(receipt_payload).execute()
-                    st.success("Receipt saved!")
+                    res = supabase.table("receipts").insert(receipt_payload).execute()
                     
-                    # Reset state
+                    # Get newly created receipt ID
+                    if res.data:
+                        receipt_id = res.data[0]["id"]
+
+                        # 2. Insert items into 'receipt_items' child table
+                        items_payload = []
+                        for _, row in edited_items_df.iterrows():
+                            if str(row.get("item_name", "")).strip():
+                                items_payload.append({
+                                    "receipt_id": receipt_id,
+                                    "item_name": str(row.get("item_name", "")),
+                                    "price": float(row.get("price", 0.0))
+                                })
+
+                        if items_payload:
+                            supabase.table("receipt_items").insert(items_payload).execute()
+
+                    st.success("Receipt and items saved successfully!")
+
+                    # Reset state for next upload
                     st.session_state.processed_file_id = None
+                    st.session_state.extracted_date = datetime.date.today()
                     st.session_state.extracted_subtotal = 0.0
                     st.session_state.extracted_extra = 0.0
                     st.session_state.extracted_total = 0.0
-                    st.session_state.extracted_items = ""
+                    st.session_state.extracted_items_df = pd.DataFrame(columns=["item_name", "price"])
                     st.rerun()
+
                 except Exception as err:
                     st.error(f"Save error: {err}")
 
@@ -238,14 +288,21 @@ if active_user_id or st.session_state.admin:
     st.subheader("2. Ranked Receipts Spreadsheet")
 
     if st.session_state.admin and not active_user_id:
-        rec_resp = supabase.table("receipts").select("*").execute()
+        rec_resp = supabase.table("receipts").select("*, receipt_items(*)").execute()
     elif active_user_id:
-        rec_resp = supabase.table("receipts").select("*").eq("user_id", active_user_id).execute()
+        rec_resp = supabase.table("receipts").select("*, receipt_items(*)").eq("user_id", active_user_id).execute()
     else:
         rec_resp = None
 
     if rec_resp and rec_resp.data:
         df = pd.DataFrame(rec_resp.data)
+        
+        # Format item list from child table for easy viewing
+        if "receipt_items" in df.columns:
+            df["items"] = df["receipt_items"].apply(
+                lambda items: ", ".join([f"{i.get('item_name')} (${i.get('price')})" for i in items]) if isinstance(items, list) else ""
+            )
+
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
