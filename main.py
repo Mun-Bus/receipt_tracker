@@ -842,5 +842,5 @@ else:
 | **Status Dashboard** | Live progress bar showing total rows, processed count, and failed count via WebSockets or polling. |
 | **Error Log CSV** | Generates an exported CSV containing only failed rows alongside a newly injected column detailing specific error reasons for quick admin correction. |
 | **Audit Logs** | Tracks who initiated the upload, timestamp, filename, and final row count for administrative compliance. |
-"""
 Assuming you are building this with a standard web stack (e.g., React/Node, Python/Django, or PHP/Laravel), which specific tech stack or framework are you implementing this in?
+"""
