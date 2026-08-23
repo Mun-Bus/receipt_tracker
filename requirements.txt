@@ -4,3 +4,4 @@ pandas
 streamlit-aggrid
 pillow
 openai
+plotly.graph_objects
