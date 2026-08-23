@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
-# Fallback vision models list (prioritizes stable free multimodal models)
+# Fallback vision models list
 FREE_VISION_CANDIDATES = [
     "qwen/qwen2.5-vl-72b-instruct:free",
     "meta-llama/llama-3.2-11b-vision-instruct:free",
@@ -34,7 +34,7 @@ def init_supabase():
 supabase = init_supabase()
 
 def encode_image(img):
-    """Downscales the image to a max dimension of 1024px and compresses JPEG quality to shrink payload size."""
+    """Downscales the image to a max dimension of 1024px and compresses JPEG quality."""
     resized_img = img.copy()
     resized_img.thumbnail((1024, 1024))
     
@@ -185,7 +185,6 @@ if st.session_state.admin:
         "⚙️ Manage Data"
     ])
 
-    # Fetch data independently to bypass DB foreign key constraints
     try:
         receipts_resp = supabase.table("receipts").select("*").execute()
         receipts_data = receipts_resp.data or []
@@ -240,7 +239,6 @@ if st.session_state.admin:
         if not all_receipts_df.empty:
             valid_dates = all_receipts_df["date_dt"].dropna()
             
-            # Select month/year filter
             if not valid_dates.empty:
                 available_months = sorted(all_receipts_df["month_year"].dropna().unique(), reverse=True)
                 cal_month_str = st.selectbox("Select Month View", options=available_months, index=0)
@@ -252,7 +250,6 @@ if st.session_state.admin:
             num_days = calendar.monthrange(year, month)[1]
             month_days = [datetime.date(year, month, day) for day in range(1, num_days + 1)]
             
-            # Aggregate per date
             date_stats = {}
             for d in month_days:
                 d_str = str(d)
@@ -276,9 +273,6 @@ if st.session_state.admin:
                     "items_summary": items_summary if items_summary else "No item details"
                 }
 
-            # Build Calendar Grid Data Structure
-            first_day_weekday = calendar.monthrange(year, month)[0] # 0 = Monday
-            
             grid_x, grid_y, z_vals, text_labels, hover_texts, custom_dates = [], [], [], [], [], []
             week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             
@@ -304,7 +298,6 @@ if st.session_state.admin:
                 hover_texts.append(hover_content)
                 custom_dates.append(d_str)
 
-            # Create Plotly Heatmap Matrix
             fig = go.Figure(data=go.Heatmap(
                 x=grid_x,
                 y=grid_y,
@@ -327,7 +320,6 @@ if st.session_state.admin:
                 margin=dict(l=40, r=40, t=50, b=40)
             )
 
-            # Capture Click Selection Event from Plotly
             event_data = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
             
             selected_date = None
@@ -339,7 +331,6 @@ if st.session_state.admin:
             if selected_date:
                 st.session_state.selected_calendar_date = selected_date
 
-            # Render Detailed Breakdown for Selected Date
             st.divider()
             active_date = st.session_state.selected_calendar_date
             if active_date:
