@@ -264,16 +264,23 @@ if st.session_state.admin:
         with cal_col_center:
             cal_output = calendar(events=calendar_events, options=calendar_options, key="receipt_fullcalendar")
 
+        # Safely capture date click or event click
         if cal_output.get("dateClick"):
-            clicked_date = cal_output["dateClick"]["dateStr"].split("T")[0]
-            if st.session_state.selected_calendar_date != clicked_date:
-                st.session_state.selected_calendar_date = clicked_date
-                st.rerun()
+            click_data = cal_output["dateClick"]
+            raw_date = click_data.get("date") or click_data.get("dateStr")
+            if raw_date:
+                clicked_date = str(raw_date).split("T")[0]
+                if st.session_state.selected_calendar_date != clicked_date:
+                    st.session_state.selected_calendar_date = clicked_date
+                    st.rerun()
         elif cal_output.get("eventClick"):
-            event_start = cal_output["eventClick"]["event"]["start"].split("T")[0]
-            if st.session_state.selected_calendar_date != event_start:
-                st.session_state.selected_calendar_date = event_start
-                st.rerun()
+            event_data = cal_output["eventClick"].get("event", {})
+            raw_date = event_data.get("start") or event_data.get("date")
+            if raw_date:
+                event_start = str(raw_date).split("T")[0]
+                if st.session_state.selected_calendar_date != event_start:
+                    st.session_state.selected_calendar_date = event_start
+                    st.rerun()
 
         st.divider()
 
