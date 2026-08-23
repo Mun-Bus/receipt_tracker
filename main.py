@@ -16,14 +16,12 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
-# Fallback vision models list
 FREE_VISION_CANDIDATES = [
     "qwen/qwen2.5-vl-72b-instruct:free",
     "meta-llama/llama-3.2-11b-vision-instruct:free",
     "openrouter/free"
 ]
 
-# Initialize Supabase
 @st.cache_resource
 def init_supabase():
     return create_client(
@@ -34,21 +32,17 @@ def init_supabase():
 supabase = init_supabase()
 
 def encode_image(img):
-    """Downscales the image to a max dimension of 1024px and compresses JPEG quality."""
     resized_img = img.copy()
     resized_img.thumbnail((1024, 1024))
-    
     buffered = io.BytesIO()
     resized_img.save(buffered, format="JPEG", quality=75, optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def analyze_receipt(prompt_text, base64_img, api_key):
-    """Iterates through free vision endpoints until one successfully returns parsed receipt JSON."""
     ai_client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key
     )
-    
     last_err = ""
     for model_id in FREE_VISION_CANDIDATES:
         try:
@@ -65,16 +59,13 @@ def analyze_receipt(prompt_text, base64_img, api_key):
                             {"type": "text", "text": prompt_text},
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_img}"
-                                }
+                                "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
                             }
                         ]
                     }
                 ]
             )
             ai_text = response.choices[0].message.content or ""
-            
             cleaned = re.sub(r"```json\s*", "", ai_text)
             cleaned = re.sub(r"```\s*", "", cleaned)
             json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
@@ -143,7 +134,7 @@ users_resp = supabase.table("users").select("*").execute()
 users_data = users_resp.data or []
 
 user_options = {
-    f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(): u["id"]
+    f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(): str(u["id"])
     for u in users_data
 }
 user_lookup = {v: k for k, v in user_options.items()}
@@ -201,11 +192,15 @@ if st.session_state.admin:
     raw_items_df = pd.DataFrame(items_data)
 
     if not all_receipts_df.empty:
+        all_receipts_df["id"] = all_receipts_df["id"].astype(str)
+        all_receipts_df["user_id"] = all_receipts_df["user_id"].astype(str)
+        all_receipts_df["date"] = all_receipts_df["date"].astype(str)
         all_receipts_df["date_dt"] = pd.to_datetime(all_receipts_df["date"], errors="coerce")
         all_receipts_df["month_year"] = all_receipts_df["date_dt"].dt.strftime("%Y-%m")
 
         item_sums = {}
         if not raw_items_df.empty:
+            raw_items_df["receipt_id"] = raw_items_df["receipt_id"].astype(str)
             raw_items_df["price"] = pd.to_numeric(raw_items_df["price"], errors="coerce").fillna(0.0)
             item_sums = raw_items_df.groupby("receipt_id")["price"].sum().to_dict()
 
@@ -235,7 +230,7 @@ if st.session_state.admin:
 
     # --- TAB 1: INTERACTIVE CALENDAR ---
     with admin_tab1:
-        st.write("**🗓️ Spending Calendar (Hover for summary, Click a cell to view details)**")
+        st.write("**🗓️ Spending Calendar (Click a cell or select below to view details)**")
         if not all_receipts_df.empty:
             valid_dates = all_receipts_df["date_dt"].dropna()
             
@@ -251,6 +246,7 @@ if st.session_state.admin:
             month_days = [datetime.date(year, month, day) for day in range(1, num_days + 1)]
             
             date_stats = {}
+            cell_to_date = {}
             for d in month_days:
                 d_str = str(d)
                 day_receipts = all_receipts_df[all_receipts_df["date"] == d_str]
@@ -289,10 +285,15 @@ if st.session_state.admin:
                 spent = stats["total_spent"]
                 count = stats["count"]
                 
-                grid_x.append(week_days[w_day])
-                grid_y.append(f"Week {week_idx + 1}")
+                y_label = f"Week {week_idx + 1}"
+                x_label = week_days[w_day]
+                
+                grid_x.append(x_label)
+                grid_y.append(y_label)
                 z_vals.append(spent)
                 text_labels.append(f"<b>{day}</b><br>${spent:.2f}" if spent > 0 else f"{day}")
+                
+                cell_to_date[(y_label, x_label)] = d_str
                 
                 hover_content = f"<b>Date:</b> {d_str}<br><b>Total Spent:</b> ${spent:,.2f}<br><b>Receipts:</b> {count}<br><br><b>Items Preview:</b><br>{stats['items_summary']}"
                 hover_texts.append(hover_content)
@@ -316,22 +317,36 @@ if st.session_state.admin:
                 title=f"Spending Heatmap - {calendar.month_name[month]} {year}",
                 xaxis=dict(title="Day of Week", categoryorder="array", categoryarray=week_days),
                 yaxis=dict(autorange="reversed", title=""),
+                clickmode="event+select",
                 height=420,
                 margin=dict(l=40, r=40, t=50, b=40)
             )
 
-            event_data = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
+            event_data = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points")
             
-            selected_date = None
             if event_data and "selection" in event_data and event_data["selection"].get("points"):
-                point = event_data["selection"]["points"][0]
-                if "customdata" in point:
-                    selected_date = point["customdata"]
-
-            if selected_date:
-                st.session_state.selected_calendar_date = selected_date
+                pts = event_data["selection"]["points"]
+                if pts:
+                    pt = pts[0]
+                    c_data = pt.get("customdata")
+                    if c_data:
+                        st.session_state.selected_calendar_date = c_data[0] if isinstance(c_data, list) else c_data
+                    else:
+                        x_pt, y_pt = pt.get("x"), pt.get("y")
+                        if (y_pt, x_pt) in cell_to_date:
+                            st.session_state.selected_calendar_date = cell_to_date[(y_pt, x_pt)]
 
             st.divider()
+            
+            c_select, _ = st.columns([1, 2])
+            with c_select:
+                manual_date = st.selectbox(
+                    "📅 Select Active Date directly:", 
+                    options=sorted(list(date_stats.keys()), reverse=True),
+                    index=0 if st.session_state.selected_calendar_date not in date_stats else sorted(list(date_stats.keys()), reverse=True).index(st.session_state.selected_calendar_date)
+                )
+                st.session_state.selected_calendar_date = manual_date
+
             active_date = st.session_state.selected_calendar_date
             if active_date:
                 st.subheader(f"📌 Detailed Breakdown for {active_date}")
@@ -349,7 +364,7 @@ if st.session_state.admin:
                     if not day_its.empty:
                         st.dataframe(
                             day_its[["item_name", "price", "receipt_id"]],
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "item_name": st.column_config.TextColumn("Product / Item"),
@@ -399,7 +414,7 @@ if st.session_state.admin:
 
                 st.dataframe(
                     item_group,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "item_name": st.column_config.TextColumn("Product / Item"),
@@ -422,7 +437,7 @@ if st.session_state.admin:
                 st.warning(f"Found {len(flagged)} receipt(s) where the total amount does not match the sum of individual line items.")
                 st.dataframe(
                     flagged[["id", "user_id", "date", "subtotal", "total_amount", "items_sum", "discrepancy"]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "subtotal": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f"),
@@ -585,7 +600,7 @@ if active_user_id or st.session_state.admin:
             st.write("Products Purchased:")
             st.dataframe(
                 st.session_state.extracted_items_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "item_name": st.column_config.TextColumn("Product Name"),
@@ -619,7 +634,7 @@ if active_user_id or st.session_state.admin:
                     res = supabase.table("receipts").insert(receipt_payload).execute()
                     
                     if res.data:
-                        receipt_id = res.data[0]["id"]
+                        receipt_id = str(res.data[0]["id"])
 
                         items_payload = []
                         for _, row in st.session_state.extracted_items_df.iterrows():
@@ -673,9 +688,11 @@ if active_user_id or st.session_state.admin:
         if all_items_resp and all_items_resp.data:
             items_df_tmp = pd.DataFrame(all_items_resp.data)
             if not items_df_tmp.empty and "receipt_id" in items_df_tmp.columns:
+                items_df_tmp["receipt_id"] = items_df_tmp["receipt_id"].astype(str)
                 for r_id, group in items_df_tmp.groupby("receipt_id"):
                     items_dict[r_id] = ", ".join([f"{row['item_name']} (${row['price']})" for _, row in group.iterrows()])
 
+        df["id"] = df["id"].astype(str)
         df["items"] = df["id"].apply(lambda r_id: items_dict.get(r_id, ""))
 
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
