@@ -35,8 +35,6 @@ if "extracted_date" not in st.session_state:
     st.session_state.extracted_date = datetime.date.today()
 if "extracted_subtotal" not in st.session_state:
     st.session_state.extracted_subtotal = 0.0
-if "extracted_extra" not in st.session_state:
-    st.session_state.extracted_extra = 0.0
 if "extracted_total" not in st.session_state:
     st.session_state.extracted_total = 0.0
 if "extracted_items_df" not in st.session_state:
@@ -135,7 +133,7 @@ if active_user_id or st.session_state.admin:
                         Analyze this receipt image.
                         1. Extract the transaction date printed at the top. Format as YYYY-MM-DD. If year is missing from receipt, infer using the current year ({current_year}).
                         2. Extract all items/products with their names and individual prices.
-                        3. Extract subtotal, extra_amount (tax/tip/fees), and final total_amount.
+                        3. Extract subtotal and final total_amount.
 
                         Return ONLY valid JSON matching this exact structure:
                         {{
@@ -145,8 +143,7 @@ if active_user_id or st.session_state.admin:
                                 {{"item_name": "Item B", "price": 2.50}}
                             ],
                             "subtotal": 7.50,
-                            "extra_amount": 0.75,
-                            "total_amount": 8.25
+                            "total_amount": 7.50
                         }}
                         """
 
@@ -200,7 +197,6 @@ if active_user_id or st.session_state.admin:
 
                                 st.session_state.extracted_date = parsed_date
                                 st.session_state.extracted_subtotal = float(extracted.get("subtotal", 0.0))
-                                st.session_state.extracted_extra = float(extracted.get("extra_amount", 0.0))
                                 st.session_state.extracted_total = float(extracted.get("total_amount", 0.0))
                                 st.session_state.extracted_items_df = items_df
                                 st.session_state.processed_file_id = file_id
@@ -211,11 +207,11 @@ if active_user_id or st.session_state.admin:
 
             st.write("**Verify Data:**")
             
-            st.write("Products Purchased:")
-            edited_items_df = st.data_editor(
+            st.write("Products Purchased (Read Only):")
+            st.dataframe(
                 st.session_state.extracted_items_df,
-                num_rows="dynamic",
                 use_container_width=True,
+                hide_index=True,
                 column_config={
                     "item_name": st.column_config.TextColumn("Product Name"),
                     "price": st.column_config.NumberColumn("Price ($)", format="$%.2f")
@@ -225,7 +221,6 @@ if active_user_id or st.session_state.admin:
             with st.form("receipt_form"):
                 rec_date = st.date_input("Date", value=st.session_state.extracted_date)
                 subtotal = st.number_input("Subtotal ($)", value=st.session_state.extracted_subtotal, step=0.01)
-                extra_amount = st.number_input("Extra Amount / Tax / Tip ($)", value=st.session_state.extracted_extra, step=0.01)
                 total_amount = st.number_input("Total Amount ($)", value=st.session_state.extracted_total, step=0.01)
 
                 submit_btn = st.form_submit_button("Save Receipt")
@@ -245,7 +240,6 @@ if active_user_id or st.session_state.admin:
                         "date": str(rec_date),
                         "subtotal": subtotal,
                         "total_amount": total_amount,
-                        "extra_amount": extra_amount,
                         "image_url": public_url
                     }
                     res = supabase.table("receipts").insert(receipt_payload).execute()
@@ -254,9 +248,9 @@ if active_user_id or st.session_state.admin:
                     if res.data:
                         receipt_id = res.data[0]["id"]
 
-                        # 2. Insert items into 'receipt_items' child table
+                        # 2. Insert items into 'receipt_items' child table from read-only dataframe
                         items_payload = []
-                        for _, row in edited_items_df.iterrows():
+                        for _, row in st.session_state.extracted_items_df.iterrows():
                             if str(row.get("item_name", "")).strip():
                                 items_payload.append({
                                     "receipt_id": receipt_id,
@@ -273,7 +267,6 @@ if active_user_id or st.session_state.admin:
                     st.session_state.processed_file_id = None
                     st.session_state.extracted_date = datetime.date.today()
                     st.session_state.extracted_subtotal = 0.0
-                    st.session_state.extracted_extra = 0.0
                     st.session_state.extracted_total = 0.0
                     st.session_state.extracted_items_df = pd.DataFrame(columns=["item_name", "price"])
                     st.rerun()
@@ -313,12 +306,12 @@ if active_user_id or st.session_state.admin:
         df["Rank"] = df["total_amount"].rank(ascending=False, method="min").astype(int)
         df = df.sort_values(by="Rank")
 
-        display_cols = ["Rank", "user_id", "date", "items", "subtotal", "extra_amount", "total_amount", "created_at", "image_url"]
+        display_cols = ["Rank", "user_id", "date", "items", "subtotal", "total_amount", "created_at", "image_url"]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationAutoPageSize=True)
-        gb.configure_default_column(editable=True, groupable=True)
+        gb.configure_default_column(editable=False, groupable=True)
         gridOptions = gb.build()
 
         AgGrid(df_display, gridOptions=gridOptions, height=350, theme="alpine")
