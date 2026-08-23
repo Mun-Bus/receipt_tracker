@@ -1,5 +1,6 @@
 import re
 import uuid
+import datetime
 import pandas as pd
 from PIL import Image
 import pytesseract
@@ -23,7 +24,7 @@ supabase = init_supabase()
 if "admin" not in st.session_state:
     st.session_state.admin = None
 
-# --- SIDEBAR: ADMIN LOGIN (BUILT-IN AUTH) ---
+# --- SIDEBAR: ADMIN LOGIN ---
 st.sidebar.title("🔒 System Access")
 
 if st.session_state.admin:
@@ -51,7 +52,6 @@ else:
 # --- MAIN SCREEN: STANDARD USER MANAGEMENT ---
 st.title("Receipt Manager")
 
-# Fetch regular profiles from custom 'users' table
 users_resp = supabase.table("users").select("*").execute()
 users_data = users_resp.data or []
 
@@ -83,7 +83,6 @@ with col_add:
             else:
                 st.warning("First name required.")
 
-# Admin Banner
 if st.session_state.admin:
     st.info("⚡ **Admin Mode Active:** You can view master logs for all users.")
 
@@ -93,7 +92,7 @@ active_user_id = user_options.get(selected_name) if selected_name != "-- Select 
 if active_user_id or st.session_state.admin:
     st.divider()
 
-    # 1. RECEIPT UPLOAD (Requires a selected profile)
+    # 1. RECEIPT UPLOAD
     if active_user_id:
         st.subheader(f"1. Upload Receipt for {selected_name}")
         uploaded_file = st.file_uploader("Upload receipt photo", type=["jpg", "jpeg", "png"])
@@ -112,7 +111,7 @@ if active_user_id or st.session_state.admin:
 
             st.write("**Verify Data:**")
             with st.form("receipt_form"):
-                rec_date = st.text_input("Date", value="August 8")
+                rec_date = st.date_input("Date", value=datetime.date.today())
                 subtotal = st.number_input("Subtotal ($)", value=float(default_subtotal), step=1.0)
                 total_amount = st.number_input("Total Amount ($)", value=float(default_total), step=1.0)
                 extra_amount = st.number_input("Extra Amount ($)", value=0.0, step=1.0)
@@ -129,7 +128,7 @@ if active_user_id or st.session_state.admin:
 
                     receipt_payload = {
                         "user_id": active_user_id,
-                        "date": rec_date,
+                        "date": str(rec_date),
                         "subtotal": subtotal,
                         "total_amount": total_amount,
                         "extra_amount": extra_amount,
@@ -147,10 +146,8 @@ if active_user_id or st.session_state.admin:
     st.subheader("2. Ranked Receipts Spreadsheet")
 
     if st.session_state.admin and not active_user_id:
-        # Admin views ALL database entries
         rec_resp = supabase.table("receipts").select("*").execute()
     elif active_user_id:
-        # Filtered to selected user profile
         rec_resp = supabase.table("receipts").select("*").eq("user_id", active_user_id).execute()
     else:
         rec_resp = None
