@@ -1,16 +1,19 @@
+import base64
+import io
+import json
 import re
 import uuid
 import datetime
 import pandas as pd
 from PIL import Image
-import pytesseract
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder
 from supabase import create_client
+from openai import OpenAI
 
 st.set_page_config(page_title="Receipt Manager", layout="wide")
 
-# Initialize Supabase client
+# Initialize Supabase
 @st.cache_resource
 def init_supabase():
     return create_client(
@@ -19,6 +22,18 @@ def init_supabase():
     )
 
 supabase = init_supabase()
+
+# Initialize OpenRouter Client (OpenAI compatible)
+ai_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=st.secrets["OPENROUTER_API_KEY"]
+)
+
+# Helper function to convert PIL Image to Base64
+def encode_image(img):
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 # Initialize session state for Admin Auth
 if "admin" not in st.session_state:
@@ -49,7 +64,7 @@ else:
             except Exception as e:
                 st.error("Invalid admin credentials.")
 
-# --- MAIN SCREEN: STANDARD USER MANAGEMENT ---
+# --- MAIN SCREEN ---
 st.title("Receipt Manager")
 
 users_resp = supabase.table("users").select("*").execute()
@@ -98,23 +113,52 @@ if active_user_id or st.session_state.admin:
         uploaded_file = st.file_uploader("Upload receipt photo", type=["jpg", "jpeg", "png"])
 
         if uploaded_file is not None:
-            image = Image.open(uploaded_file)
+            image = Image.open(uploaded_file).convert("RGB")
             st.image(image, caption="Uploaded Receipt", width=300)
 
-            with st.spinner("Processing image..."):
-                raw_text = pytesseract.image_to_string(image)
-                numbers = re.findall(r'(\d+[\.,]?\d*)', raw_text)
-                extracted_amounts = [float(n.replace(',', '.')) for n in numbers if n.replace('.', '').isdigit()]
-                
-                default_total = max(extracted_amounts) if extracted_amounts else 0.0
-                default_subtotal = extracted_amounts[0] if len(extracted_amounts) > 1 else default_total
+            with st.spinner("Analyzing receipt with Vision AI..."):
+                base64_image = encode_image(image)
+                default_subtotal = 0.0
+                default_total = 0.0
+
+                try:
+                    response = ai_client.chat.completions.create(
+                        model="qwen/qwen-2-vl-7b-instruct:free",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Analyze this receipt. Extract subtotal and total_amount. Return ONLY valid JSON format like this: {\"subtotal\": 12.50, \"total_amount\": 15.00}"
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    )
+
+                    ai_text = response.choices[0].message.content
+                    json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                    if json_match:
+                        extracted_data = json.loads(json_match.group(0))
+                        default_subtotal = float(extracted_data.get("subtotal", 0.0))
+                        default_total = float(extracted_data.get("total_amount", 0.0))
+
+                except Exception as e:
+                    st.error(f"AI extraction error: {e}")
 
             st.write("**Verify Data:**")
             with st.form("receipt_form"):
                 rec_date = st.date_input("Date", value=datetime.date.today())
-                subtotal = st.number_input("Subtotal ($)", value=float(default_subtotal), step=1.0)
-                total_amount = st.number_input("Total Amount ($)", value=float(default_total), step=1.0)
-                extra_amount = st.number_input("Extra Amount ($)", value=0.0, step=1.0)
+                subtotal = st.number_input("Subtotal ($)", value=default_subtotal, step=0.01)
+                total_amount = st.number_input("Total Amount ($)", value=default_total, step=0.01)
+                extra_amount = st.number_input("Extra Amount ($)", value=0.0, step=0.01)
                 submit_btn = st.form_submit_button("Save Receipt")
 
             if submit_btn:
